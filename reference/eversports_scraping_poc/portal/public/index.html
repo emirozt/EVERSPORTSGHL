@@ -1,0 +1,232 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Eversync — Cookie Upload Portal</title>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+    :root {
+      --bg:      #0d0f14;
+      --surface: #161b24;
+      --surf2:   #1e2535;
+      --border:  #2a3347;
+      --accent:  #4f8ef7;
+      --green:   #34c77b;
+      --text:    #e2e8f0;
+      --muted:   #7f8ea3;
+      --r:       10px;
+    }
+    body {
+      background: var(--bg); color: var(--text);
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+      min-height: 100vh;
+      display: flex; flex-direction: column; align-items: center;
+      padding: 40px 16px 60px;
+    }
+    header { text-align: center; margin-bottom: 28px; }
+    header h1 { font-size: 1.65rem; font-weight: 700; }
+    header p  { color: var(--muted); margin-top: 6px; font-size: 0.91rem; }
+
+    .card {
+      background: var(--surface); border: 1px solid var(--border);
+      border-radius: var(--r); padding: 28px;
+      width: 100%; max-width: 500px;
+    }
+
+    .sec-label {
+      font-size: 0.7rem; font-weight: 700; text-transform: uppercase;
+      letter-spacing: .08em; color: var(--muted);
+      margin-bottom: 12px; padding-bottom: 7px;
+      border-bottom: 1px solid var(--border);
+    }
+    .field { margin-bottom: 13px; }
+    label {
+      display: block; font-size: .78rem; font-weight: 600;
+      color: var(--muted); text-transform: uppercase;
+      letter-spacing: .06em; margin-bottom: 5px;
+    }
+    input[type="text"], input[type="password"], textarea {
+      width: 100%; padding: 10px 13px;
+      background: var(--surf2); border: 1px solid var(--border);
+      border-radius: 6px; color: var(--text);
+      font-size: .93rem; outline: none;
+      transition: border-color .18s;
+    }
+    input:focus, textarea:focus { border-color: var(--accent); }
+    textarea { resize: vertical; min-height: 110px; font-family: monospace; font-size: .82rem; }
+    .field-note { font-size: .75rem; color: var(--muted); margin-top: 5px; line-height: 1.4; }
+    .field-note strong { color: var(--text); }
+
+    hr { border: none; border-top: 1px solid var(--border); margin: 20px 0; }
+
+    .instruct {
+      background: var(--surf2); border: 1px solid var(--border);
+      border-radius: 7px; padding: 13px 15px; margin-bottom: 14px;
+    }
+    .instruct ol { padding-left: 17px; }
+    .instruct li { font-size: .84rem; color: var(--muted); margin-bottom: 7px; line-height: 1.5; }
+    .instruct li strong { color: var(--text); }
+    .instruct a { color: var(--accent); text-decoration: none; }
+    .instruct a:hover { text-decoration: underline; }
+
+    .or-line {
+      display: flex; align-items: center; gap: 10px;
+      margin: 14px 0; font-size: .78rem; color: var(--muted);
+    }
+    .or-line::before, .or-line::after {
+      content: ''; flex: 1; border-top: 1px solid var(--border);
+    }
+
+    .drop-zone {
+      border: 2px dashed var(--border); border-radius: 8px;
+      padding: 22px 16px; text-align: center;
+      cursor: pointer; background: var(--surf2);
+      position: relative; transition: border-color .18s, background .18s;
+    }
+    .drop-zone:hover, .drop-zone.over { border-color: var(--accent); background: #1a2540; }
+    .drop-zone input[type="file"] {
+      position: absolute; inset: 0; opacity: 0;
+      cursor: pointer; width: 100%; height: 100%;
+    }
+    .drop-icon { font-size: 1.5rem; margin-bottom: 5px; }
+    .drop-text { font-size: .85rem; color: var(--muted); }
+    .drop-ok   { color: var(--green); font-size: .88rem; margin-top: 6px; font-weight: 600; display: none; }
+
+    /* alerts use inline styles from JS — these are fallback base styles only */
+    .alert { display: none; border-radius: 6px; padding: 11px 14px; font-size: .86rem; margin-bottom: 12px; }
+
+    .btn-go {
+      width: 100%; padding: 12px;
+      background: var(--accent); color: #fff;
+      border: none; border-radius: 6px;
+      font-size: .95rem; font-weight: 600; cursor: pointer;
+      display: flex; align-items: center; justify-content: center; gap: 8px;
+      transition: background .18s;
+    }
+    .btn-go:hover:not(:disabled) { background: #6ba3ff; }
+    .btn-go:disabled { opacity: .55; cursor: not-allowed; }
+
+    .spinner {
+      width: 15px; height: 15px;
+      border: 2px solid rgba(255,255,255,.35); border-top-color: #fff;
+      border-radius: 50%; animation: spin .65s linear infinite; display: none;
+    }
+    @keyframes spin { to { transform: rotate(360deg); } }
+
+    #successBox { display: none; text-align: center; padding: 10px 0; }
+    #successBox .s-icon { font-size: 2.8rem; margin-bottom: 12px; }
+    #successBox h2 { font-size: 1.2rem; font-weight: 700; margin-bottom: 8px; }
+    #successBox p  { color: var(--muted); font-size: .89rem; line-height: 1.55; }
+    .badge {
+      display: inline-block; margin-top: 11px;
+      background: #0f2a1e; border: 1px solid #065f46; color: #6ee7b7;
+      border-radius: 20px; padding: 4px 14px; font-size: .8rem; font-weight: 600;
+    }
+    .next-steps {
+      background: var(--surf2); border: 1px solid var(--border);
+      border-radius: 7px; padding: 14px 16px; margin-top: 18px; text-align: left;
+    }
+    .next-steps h3 { font-size: .82rem; font-weight: 700; color: var(--text); margin-bottom: 10px; }
+    .next-steps ol { padding-left: 17px; }
+    .next-steps li { font-size: .82rem; color: var(--muted); margin-bottom: 7px; line-height: 1.5; }
+    .next-steps li strong { color: var(--text); }
+
+    @media (max-width: 520px) { .card { padding: 20px 14px; } }
+  </style>
+</head>
+<body>
+
+<header>
+  <h1>Eversync Portal</h1>
+  <p>Connect your Eversports session to GoHighLevel</p>
+</header>
+
+<div class="card">
+
+  <!-- SUCCESS (hidden until upload succeeds) -->
+  <div id="successBox">
+    <div class="s-icon">&#9989;</div>
+    <h2>Session Activated!</h2>
+    <p>Your Eversports cookies have been accepted.<br/>The sync daemon is now running.</p>
+    <div class="badge" id="expiryBadge"></div>
+    <div class="next-steps">
+      <h3>&#127381; What happens next</h3>
+      <ol>
+        <li>The sync daemon will automatically pull today&#39;s class bookings.</li>
+        <li>New contacts will appear in <strong>GoHighLevel</strong> within a few minutes.</li>
+        <li><strong>Session expires in ~30 days.</strong> Return here to refresh it — your admin will notify you in advance.</li>
+      </ol>
+    </div>
+  </div>
+
+  <!-- MAIN FORM -->
+  <div id="mainForm">
+
+    <div class="sec-label">Step 1 &mdash; Your credentials</div>
+    <div class="field">
+      <label for="locationId">Location ID</label>
+      <input type="text" id="locationId" placeholder="e.g. AbCdEfGhIj123" autocomplete="off" />
+    </div>
+    <div class="field">
+      <label for="secret">Portal Password</label>
+      <input type="password" id="secret" placeholder="Auto-generated key from your admin" autocomplete="off" />
+      <div class="field-note">
+        Not your GHL API key &mdash; it&#39;s the one-time password your admin saw when running <code>add-tenant</code>.
+      </div>
+    </div>
+
+    <hr />
+
+    <div class="sec-label">Step 2 &mdash; Export cookies from Chrome</div>
+    <div class="instruct">
+      <ol>
+        <li>Install the free <a href="https://chrome.google.com/webstore/detail/cookie-editor/hlkenndednhfkekhgcdicdfddnkalmdm" target="_blank" rel="noopener"><strong>Cookie-Editor</strong></a> extension.</li>
+        <li>Log in to <strong>app.eversportsmanager.com</strong>. Land on the <strong>manager dashboard</strong>, not the login page.</li>
+        <li>Click the Cookie-Editor icon &rarr; <strong>Export &rarr; Export as JSON</strong>. The JSON is now in your clipboard.</li>
+      </ol>
+    </div>
+
+    <hr />
+
+    <div class="sec-label">Step 3 &mdash; Provide the cookie JSON</div>
+
+    <div class="field">
+      <label for="cookieText">Option A &mdash; Paste JSON directly (recommended)</label>
+      <textarea id="cookieText" placeholder='Paste the copied JSON here, e.g. [{"name":"...","value":"...",...}]'></textarea>
+      <div class="field-note">Paste the text copied to your clipboard by Cookie-Editor.</div>
+    </div>
+
+    <div class="or-line">or</div>
+
+    <label style="margin-bottom:6px;display:block;font-size:.78rem;font-weight:600;color:var(--muted);text-transform:uppercase;letter-spacing:.06em;">
+      Option B &mdash; Upload a .json file
+    </label>
+    <div class="drop-zone" id="dropZone">
+      <input type="file" id="fileInput" accept=".json,application/json" />
+      <div class="drop-icon">&#128196;</div>
+      <div class="drop-text">Drag &amp; drop <strong>cookies.json</strong> here, or <u>click to browse</u></div>
+      <div class="drop-ok" id="fileName"></div>
+    </div>
+
+    <hr />
+
+    <div id="errMsg"  class="alert"></div>
+    <div id="warnMsg" class="alert"></div>
+
+    <button class="btn-go" id="btnUpload" type="button">
+      <span id="btnLabel">Upload &amp; Activate</span>
+      <span class="spinner" id="spinner"></span>
+    </button>
+
+    <div style="font-size:.75rem;color:var(--muted);text-align:center;margin-top:10px;">
+      &#128274; Credentials are only used to authenticate this upload.
+    </div>
+
+  </div><!-- #mainForm -->
+</div><!-- .card -->
+
+<!-- External script — allowed by CSP script-src 'self' -->
+<script src="/portal.js"></script>
+</body>
+</html>
