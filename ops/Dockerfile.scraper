@@ -1,0 +1,35 @@
+FROM python:3.12-slim
+
+# Install system dependencies for Playwright/Chromium
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    chromium \
+    chromium-driver \
+    fonts-liberation \
+    libasound2 \
+    libatk-bridge2.0-0 \
+    libdrm2 \
+    libgbm1 \
+    libgtk-3-0 \
+    libnss3 \
+    libxcomposite1 \
+    libxdamage1 \
+    libxrandr2 \
+    xdg-utils \
+    && rm -rf /var/lib/apt/lists/*
+
+# Install uv
+COPY --from=ghcr.io/astral-sh/uv:latest /uv /uvx /usr/local/bin/
+
+WORKDIR /app
+
+COPY pyproject.toml uv.lock* ./
+RUN uv sync --frozen --no-dev 2>/dev/null || uv sync --no-dev
+
+COPY app/ ./app/
+
+ENV PATH="/app/.venv/bin:$PATH"
+ENV PYTHONUNBUFFERED=1
+ENV PLAYWRIGHT_BROWSERS_PATH=/usr/bin
+
+# Playwright will use the system Chromium installed above
+CMD ["python", "-m", "app.scrapers.worker"]

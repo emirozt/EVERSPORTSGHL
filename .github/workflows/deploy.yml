@@ -1,0 +1,22 @@
+name: Deploy
+
+on:
+  push:
+    tags:
+      - "v*"
+
+# Hosting target TBD (Fly.io / Railway — decide at M10).
+# Stub kept so the workflow file exists; add deploy steps when hosting is selected.
+
+jobs:
+  build:
+    name: Build & push Docker image
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build app image
+        run: docker build -f ops/Dockerfile.app -t eversports-ghl-connector:${{ github.ref_name }} .
+      - name: Build scraper image
+        run: docker build -f ops/Dockerfile.scraper -t eversports-ghl-connector-scraper:${{ github.ref_name }} .
+      - name: "TODO: push to registry"
+        run: echo "Add registry push + deploy step when hosting target is selected."
