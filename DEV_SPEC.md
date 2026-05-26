@@ -264,6 +264,9 @@ CREATE TABLE locations (
   whatsapp_templates JSONB NOT NULL DEFAULT '{}',
   consent_default_locale TEXT NOT NULL DEFAULT 'de-AT',
   historical_sync_flag TEXT NOT NULL DEFAULT 'pending',
+  writeback_mode TEXT NOT NULL DEFAULT 'auto_execute',           -- 'auto_execute' | 'admin_task' (07_foundation_layer.md § config table)
+  uc05_slot_min_lead_time_minutes INT NOT NULL DEFAULT 60,       -- UC05 slot lead-time guard; see 07_foundation_layer.md § UC05 availability freshness
+  uc05_safety_margin_spots INT NOT NULL DEFAULT 2,               -- UC05 min free-spots; see 07_foundation_layer.md § UC05 availability freshness
   created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
   updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );

@@ -865,8 +865,9 @@ Per-location overrides in `locations.product_keyword_map` JSON.
 
 | Key | Description | Example |
 |---|---|---|
-| `location_id` | Internal UUID | uuid |
+| `location_id` | Internal UUID (PK — `id` column in the `locations` table) | uuid |
 | `eversports_studio_id` | Eversports studio ID in export URLs | `Yneu3U` |
+| `eversports_location_id` | Optional sub-location identifier within a multi-site studio. Nullable. | `loc_abc` |
 | `ghl_subaccount_id` | GHL sub-account ID | `abc123` |
 | `ghl_oauth_token_ref` | Secret manager reference | `secret://ghl/abc123` |
 | `eversports_credentials_ref` | Scraper login | `secret://eversports/login/abc123` |
@@ -882,6 +883,7 @@ Per-location overrides in `locations.product_keyword_map` JSON.
 | `card_upsell_min_sessions_per_week` | Threshold for Card → Membership ready upsell trigger. The `membership-ready` tag fires when a card customer's `sessions_per_week_last_month` exceeds this. | `2` |
 | `product_keyword_map` | JSON override for is_trial/is_membership/etc | `{}` |
 | `whatsapp_templates` | Approved WhatsApp Business templates list | see UC01 |
+| `consent_default_locale` | BCP-47 locale used as the fallback when auto-detecting date/phone formats during CSV bootstrap and when generating consent invitation copy. | `de-AT` |
 | `writeback_mode` | Per-location: how UC04/UC05 perform Eversports actions | `auto_execute` (default) or `admin_task` |
 | `uc05_slot_min_lead_time_minutes` | UC05 won't propose slots starting within N minutes of "now". Default 60 min — absorbs sync staleness up to one hourly catch-up cycle. | `60` |
 | `uc05_safety_margin_spots` | Minimum free-spots a slot must show before UC05 will propose it. Default 2. | `2` |

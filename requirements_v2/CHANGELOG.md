@@ -243,6 +243,17 @@ Final cleanup before development handoff. Three categories of change.
 - `00_master_overview.md` — Insights surface documented; v2 list refreshed
 - UI prototype `design/studio-owner-ui.html` — all v1.14 updates
 
+### v6 — 2026-05-26 — M1 spec consistency pass (locations table audit)
+
+Post-M1 audit comparing `app/db/models/location.py` and `alembic/versions/d3f8b2a4c1e9_initial_locations.py` against `07_foundation_layer.md` and `DEV_SPEC.md § 5`.
+
+**Spec updated to match code (code was correct; specs were stale):**
+
+- `DEV_SPEC.md § 5` DDL was missing `writeback_mode`, `uc05_slot_min_lead_time_minutes`, and `uc05_safety_margin_spots`. All three are documented in `07_foundation_layer.md` and were intentionally implemented by M1. Added all three to the `CREATE TABLE locations` block in DEV_SPEC with inline comments pointing to the foundation-layer spec and their defaults (`'auto_execute'`, `60`, `2`).
+- `07_foundation_layer.md` config table was missing `eversports_location_id` (nullable; added in v2 for multi-site studios) and `consent_default_locale` (TEXT NOT NULL DEFAULT `'de-AT'`; locale fallback for CSV bootstrap and consent invitation copy). Both are present in the model and migration. Both are now documented in the config table.
+
+**No code changes required.** Model and migration are internally consistent and fully implement the `07_foundation_layer.md` config table.
+
 ### Still-open items
 
 Each updated doc lists location-specific open items in its "Open Questions / To Confirm" section. The highest-impact open items rolled up:
