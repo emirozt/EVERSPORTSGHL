@@ -88,7 +88,7 @@ class TestParseBookingsCsv:
     def test_attended_yes_maps_to_attended(self, bookings_bytes: bytes) -> None:
         rows = parse_bookings_csv(bookings_bytes, TZ)
         # All rows in the sample have Attended=yes
-        statuses = set(r["attendance_status"] for r in rows)
+        statuses = {r["attendance_status"] for r in rows}
         assert "attended" in statuses
         assert "unknown" not in statuses
 
@@ -210,7 +210,8 @@ class TestParseNoshowsCsv:
             b'"Customer number";"First name";"Last name";"E-Mail";"Clubgroup name";'
             b'"Newsletter";"Product name";"Price";"Attended";"Phone number"\n'
             b'"01/05/2026 10:00";"01/05/2026 10:55";"Yoga";"";"Anna";"";'
-            b'"Jane";"Doe";"jane@example.com";"Extern";"no";"10er Karte";"100.00 \xe2\x82\xac";"no";"01234567890"\n'
+            b'"Jane";"Doe";"jane@example.com";"Extern";"no";'
+            b'"10er Karte";"100.00 \xe2\x82\xac";"no";"01234567890"\n'
         )
         rows = parse_noshows_csv(sample, TZ)
         assert len(rows) == 1
@@ -221,9 +222,11 @@ class TestParseNoshowsCsv:
         sample = (
             b'\xef\xbb\xbf"Start";"End";"Activity name";"Location";"Trainer nickname";'
             b'"Customer number";"First name";"Last name";"E-Mail";"Clubgroup name";'
-            b'"Newsletter";"Product name";"Price";"Attended";"Phone number";"Cancellation timestamp"\n'
+            b'"Newsletter";"Product name";"Price";"Attended";"Phone number";'
+            b'"Cancellation timestamp"\n'
             b'"01/05/2026 10:00";"01/05/2026 10:55";"Yoga";"";"Anna";"";'
-            b'"Jane";"Doe";"jane@example.com";"Extern";"no";"10er Karte";"100.00 \xe2\x82\xac";"no";"01234567890";"30/04/2026 22:00"\n'
+            b'"Jane";"Doe";"jane@example.com";"Extern";"no";'
+            b'"10er Karte";"100.00 \xe2\x82\xac";"no";"01234567890";"30/04/2026 22:00"\n'
         )
         rows = parse_noshows_csv(sample, TZ)
         assert len(rows) == 1

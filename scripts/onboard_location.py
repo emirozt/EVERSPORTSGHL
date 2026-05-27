@@ -38,6 +38,7 @@ async def _insert_location(
     studio_name: str,
     location_name: str,
     timezone: str,
+    country: str,
     eversports_studio_id: str,
     eversports_location_id: str | None,
     ghl_subaccount_id: str,
@@ -61,6 +62,7 @@ async def _insert_location(
         studio_name=studio_name,
         location_name=location_name,
         timezone=timezone,
+        country=country,
         eversports_studio_id=eversports_studio_id,
         eversports_location_id=eversports_location_id,
         ghl_subaccount_id=ghl_subaccount_id,
@@ -86,6 +88,13 @@ async def _insert_location(
     help='Location display name, e.g. "Flow Pilates — Mariahilf"',
 )
 @click.option("--timezone", required=True, help="IANA timezone, e.g. Europe/Vienna")
+@click.option(
+    "--country",
+    default="DE",
+    show_default=True,
+    type=click.Choice(["DE", "AT", "CH"]),
+    help="ISO 3166-1 alpha-2 country code — used as default region for phone normalisation",
+)
 @click.option(
     "--eversports-studio-id",
     required=True,
@@ -144,6 +153,7 @@ def main(
     studio_name: str,
     location_name: str,
     timezone: str,
+    country: str,
     eversports_studio_id: str,
     ghl_subaccount_id: str,
     ghl_oauth_token_ref: str,
@@ -181,6 +191,7 @@ def main(
                 studio_name=studio_name,
                 location_name=location_name,
                 timezone=timezone,
+                country=country,
                 eversports_studio_id=eversports_studio_id,
                 eversports_location_id=eversports_location_id,
                 ghl_subaccount_id=ghl_subaccount_id,
@@ -199,6 +210,7 @@ def main(
         click.echo(f"  location_name       : {loc.location_name}")
         click.echo(f"  ghl_subaccount_id   : {loc.ghl_subaccount_id}")
         click.echo(f"  timezone            : {loc.timezone}")
+        click.echo(f"  country             : {loc.country}")
         click.echo(f"  writeback_mode      : {loc.writeback_mode}")
         click.echo(f"  historical_sync_flag: {loc.historical_sync_flag}")
 

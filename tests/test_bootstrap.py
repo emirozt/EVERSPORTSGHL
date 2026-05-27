@@ -25,7 +25,7 @@ from collections.abc import AsyncGenerator
 
 import pytest
 import pytest_asyncio
-from sqlalchemy import select, text
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 from app.db.models.base import Base
@@ -91,6 +91,7 @@ async def test_location(db: AsyncSession) -> Location:
 
 def _get_bootstrap():
     from app.ingest.bootstrap import run_bootstrap  # noqa: PLC0415
+
     return run_bootstrap
 
 
@@ -98,9 +99,7 @@ def _get_bootstrap():
 
 
 async def _count(db: AsyncSession, model, location_id: uuid.UUID) -> int:
-    result = await db.execute(
-        select(model).where(model.location_id == location_id)
-    )
+    result = await db.execute(select(model).where(model.location_id == location_id))
     return len(result.scalars().all())
 
 
@@ -225,9 +224,7 @@ async def test_bootstrap_historical_sync_flag_updated(
     )
     await db.commit()
 
-    result = await db.execute(
-        select(Location).where(Location.id == test_location.id)
-    )
+    result = await db.execute(select(Location).where(Location.id == test_location.id))
     loc = result.scalar_one()
     assert loc.historical_sync_flag == "bootstrapped"
 
@@ -271,7 +268,7 @@ async def test_bootstrap_idempotency(db: AsyncSession, test_location: Location) 
     noshows_bytes = (SAMPLE_DIR / "noshows.csv").read_bytes()
 
     # First run
-    result1 = await run_bootstrap(
+    await run_bootstrap(
         location_id=test_location.id,
         bookings_bytes=bookings_bytes,
         activities_bytes=activities_bytes,
@@ -314,9 +311,7 @@ async def test_bootstrap_idempotency(db: AsyncSession, test_location: Location) 
 
 
 @pytest.mark.asyncio
-async def test_bootstrap_contact_derived_fields(
-    db: AsyncSession, test_location: Location
-) -> None:
+async def test_bootstrap_contact_derived_fields(db: AsyncSession, test_location: Location) -> None:
     """Derived fields are computed correctly for a contact with known data."""
     run_bootstrap = _get_bootstrap()
     await run_bootstrap(
@@ -345,9 +340,7 @@ async def test_bootstrap_contact_derived_fields(
 
 
 @pytest.mark.asyncio
-async def test_bootstrap_result_run_id_is_uuid(
-    db: AsyncSession, test_location: Location
-) -> None:
+async def test_bootstrap_result_run_id_is_uuid(db: AsyncSession, test_location: Location) -> None:
     """bootstrap_run_id in the result is a valid UUID string."""
     run_bootstrap = _get_bootstrap()
     result = await run_bootstrap(

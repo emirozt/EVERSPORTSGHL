@@ -47,7 +47,7 @@ from app.db.models.sessions import Session
 from app.db.models.sync_log import SyncLog
 from app.ingest.classifier import classify_product
 from app.ingest.csv_parser import parse_activities_csv, parse_bookings_csv, parse_noshows_csv
-from app.ingest.normaliser import normalise_phone, timezone_to_region
+from app.ingest.normaliser import normalise_phone
 
 logger = logging.getLogger(__name__)
 
@@ -297,15 +297,12 @@ def _compute_derived_contact_fields(
         last_month_end = date(now.year, now.month, 1)
 
     sessions_this_month = sum(
-        1
-        for b in attended
-        if b["start"] is not None and b["start"].date() >= this_month_start
+        1 for b in attended if b["start"] is not None and b["start"].date() >= this_month_start
     )
     sessions_last_month = sum(
         1
         for b in attended
-        if b["start"] is not None
-        and last_month_start <= b["start"].date() < last_month_end
+        if b["start"] is not None and last_month_start <= b["start"].date() < last_month_end
     )
 
     return {
@@ -370,9 +367,7 @@ async def run_bootstrap(
     warnings: list[str] = []
     errors: list[str] = []
 
-    logger.info(
-        "bootstrap: starting run_id=%s location_id=%s", bootstrap_run_id, location_id
-    )
+    logger.info("bootstrap: starting run_id=%s location_id=%s", bootstrap_run_id, location_id)
 
     # ── Detect dialect (for dialect-aware upserts) ─────────────────────────
     conn = await db.connection()
@@ -386,7 +381,7 @@ async def run_bootstrap(
         raise ValueError(f"Location not found: {location_id}")
 
     tz_str = location.timezone
-    region = timezone_to_region(tz_str)
+    region = location.country  # ISO 3166-1 alpha-2 (e.g. "DE", "AT", "CH")
 
     # ── Step 1: Parse ──────────────────────────────────────────────────────
     logger.info("bootstrap: step 1 — parsing CSVs")
@@ -540,9 +535,7 @@ async def run_bootstrap(
 
         contact_id = email_to_contact_id.get(email_lower)
         if contact_id is None:
-            errors.append(
-                f"No contact_id found for email_lower={email_lower!r} — booking skipped"
-            )
+            errors.append(f"No contact_id found for email_lower={email_lower!r} — booking skipped")
             continue
 
         # Use the real email_lower (not synthetic key) in the booking ID

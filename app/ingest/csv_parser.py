@@ -274,9 +274,7 @@ def parse_activities_csv(file_bytes: bytes, location_timezone: str) -> list[dict
                 }
             )
         except Exception:  # noqa: BLE001
-            logger.exception(
-                "parse_activities_csv: error on line %d, row=%r", line_num, raw_row
-            )
+            logger.exception("parse_activities_csv: error on line %d, row=%r", line_num, raw_row)
             continue
 
     logger.info("parse_activities_csv: parsed %d rows", len(rows))

@@ -32,9 +32,7 @@ class SyncLog(Base):
     contacts_processed: Mapped[int] = mapped_column(
         Integer, nullable=False, server_default=text("0")
     )
-    contacts_updated: Mapped[int] = mapped_column(
-        Integer, nullable=False, server_default=text("0")
-    )
+    contacts_updated: Mapped[int] = mapped_column(Integer, nullable=False, server_default=text("0"))
     tags_applied: Mapped[int] = mapped_column(Integer, nullable=False, server_default=text("0"))
     pipeline_moves: Mapped[int] = mapped_column(Integer, nullable=False, server_default=text("0"))
 

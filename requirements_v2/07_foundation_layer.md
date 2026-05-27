@@ -872,6 +872,7 @@ Per-location overrides in `locations.product_keyword_map` JSON.
 | `ghl_oauth_token_ref` | Secret manager reference | `secret://ghl/abc123` |
 | `eversports_credentials_ref` | Scraper login | `secret://eversports/login/abc123` |
 | `timezone` | IANA timezone | `Europe/Vienna` |
+| `country` | ISO 3166-1 alpha-2 country code. Used as `default_region` for phone normalisation (libphonenumber). DACH only: `DE`, `AT`, `CH`. Default `DE`. | `AT` |
 | `historical_sync_flag` | Whether 30-day historical sync has run | `complete` / `pending` |
 | `late_cancel_window_hours` | Studio policy | `24` |
 | `studio_owner_email` | Notifications | `owner@studio.com` |

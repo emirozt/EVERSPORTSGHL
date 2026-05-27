@@ -8,8 +8,8 @@ build/
 *.egg-info/
 .eggs/
 
-# uv
-uv.lock
+# uv — lock file is intentionally committed (reproducible builds)
+# uv.lock
 
 # Environment
 .env

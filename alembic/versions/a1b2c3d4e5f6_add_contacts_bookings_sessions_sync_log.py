@@ -70,9 +70,7 @@ def upgrade() -> None:
         sa.Column("last_session_end_time", sa.Time(), nullable=True),
         sa.Column("last_class_name", sa.Text(), nullable=True),
         sa.Column("last_booking_date", sa.Date(), nullable=True),
-        sa.Column(
-            "last_no_show_email_sent_at", sa.TIMESTAMP(timezone=True), nullable=True
-        ),
+        sa.Column("last_no_show_email_sent_at", sa.TIMESTAMP(timezone=True), nullable=True),
         sa.Column(
             "sessions_attended_this_month",
             sa.Integer(),

@@ -248,6 +248,7 @@ CREATE TABLE locations (
   ghl_oauth_token_ref TEXT NOT NULL,
   eversports_credentials_ref TEXT NOT NULL,
   timezone TEXT NOT NULL,
+  country TEXT NOT NULL DEFAULT 'DE',                                    -- ISO 3166-1 alpha-2; used as libphonenumber default_region
   late_cancel_window_hours INT NOT NULL DEFAULT 24,
   studio_owner_email TEXT NOT NULL,
   studio_name TEXT NOT NULL,

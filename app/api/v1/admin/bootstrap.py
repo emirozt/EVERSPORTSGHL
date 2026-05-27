@@ -238,10 +238,9 @@ async def reset_bootstrap(
 
     # Reset flag
     from sqlalchemy import update  # noqa: PLC0415 — local import to keep module-level clean
+
     await db.execute(
-        update(Location)
-        .where(Location.id == location_id)
-        .values(historical_sync_flag="pending")
+        update(Location).where(Location.id == location_id).values(historical_sync_flag="pending")
     )
     await db.commit()
 

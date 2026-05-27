@@ -67,9 +67,7 @@ class Contact(Base):
     total_sessions_attended: Mapped[int] = mapped_column(
         Integer, nullable=False, server_default=text("0")
     )
-    no_show_count: Mapped[int] = mapped_column(
-        Integer, nullable=False, server_default=text("0")
-    )
+    no_show_count: Mapped[int] = mapped_column(Integer, nullable=False, server_default=text("0"))
     last_session_date: Mapped[date | None] = mapped_column(Date, nullable=True)
     last_session_end_time: Mapped[time | None] = mapped_column(Time, nullable=True)
     last_class_name: Mapped[str | None] = mapped_column(Text, nullable=True)

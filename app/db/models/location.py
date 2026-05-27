@@ -36,6 +36,9 @@ class Location(Base):
     ghl_oauth_token_ref: Mapped[str] = mapped_column(Text, nullable=False)
     eversports_credentials_ref: Mapped[str] = mapped_column(Text, nullable=False)
     timezone: Mapped[str] = mapped_column(Text, nullable=False)
+    country: Mapped[str] = mapped_column(
+        Text, nullable=False, server_default=text("'DE'"), default="DE"
+    )
     late_cancel_window_hours: Mapped[int] = mapped_column(
         Integer, nullable=False, server_default=text("24")
     )
