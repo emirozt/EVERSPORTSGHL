@@ -32,7 +32,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.models.location import Location
 from app.db.models.sync_log import SyncLog
-from app.scrapers.exceptions import SessionExpiredError
+from app.scrapers.exceptions import SessionExpiredError, SessionNotConfiguredError
 
 if TYPE_CHECKING:
     from playwright.async_api import Browser, BrowserContext, Page, Playwright, Response
@@ -102,18 +102,20 @@ class EversportsBaseScraper:
             )
 
         if cookie_state == "unset" or not cookie_cache:
-            raise SessionExpiredError(
-                "Eversports session expired — please re-export cookies and run "
-                "scripts/import_cookies.py"
+            # 'unset' = location never onboarded — not a session error, just not configured.
+            # sync_runner.run_sync handles this before __aenter__ is called; this guard
+            # fires only if EversportsBaseScraper is invoked directly on an un-onboarded
+            # location (e.g. in tests or standalone scripts).
+            raise SessionNotConfiguredError(
+                f"Location {self._location.id} is not yet onboarded — "
+                "run scripts/import_cookies.py to configure session cookies"
             )
 
         # Import here so that tests can mock playwright without it being imported
         # at module level (which would fail if playwright isn't installed).
         from playwright.async_api import async_playwright  # noqa: PLC0415
 
-        logger.info(
-            "scraper: launching browser for location_id=%s", self._location.id
-        )
+        logger.info("scraper: launching browser for location_id=%s", self._location.id)
 
         self._playwright = await async_playwright().start()
         self._browser = await self._playwright.chromium.launch(
@@ -156,9 +158,7 @@ class EversportsBaseScraper:
         except Exception:  # noqa: BLE001
             logger.warning("scraper: error stopping playwright", exc_info=True)
 
-        logger.info(
-            "scraper: browser closed for location_id=%s", self._location.id
-        )
+        logger.info("scraper: browser closed for location_id=%s", self._location.id)
 
     # ── Page factory ───────────────────────────────────────────────────────────
 
@@ -280,9 +280,7 @@ class EversportsBaseScraper:
             .values(eversports_cookie_state="ok")
         )
         self._marked_ok = True
-        logger.debug(
-            "scraper: cookie_state set to 'ok' for location_id=%s", self._location.id
-        )
+        logger.debug("scraper: cookie_state set to 'ok' for location_id=%s", self._location.id)
 
     # ── Convenience ────────────────────────────────────────────────────────────
 

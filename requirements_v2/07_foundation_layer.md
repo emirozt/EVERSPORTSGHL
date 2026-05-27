@@ -97,9 +97,9 @@ Eversports admin login requires TOTP 2FA via an authenticator app. Automated ema
 
 | State | Meaning | Scraper behaviour |
 |---|---|---|
-| `unset` | No cookies imported yet | Skip run; log warning |
+| `unset` | No cookies imported yet | `sync_runner.run_sync` returns `{"skipped": True, "skip_reason": "not_onboarded"}` — log warning, do NOT raise. `EversportsBaseScraper.__aenter__` raises `SessionNotConfiguredError` as a defensive guard if invoked directly. |
 | `ok` | Cookies present; last run succeeded | Normal operation |
-| `expired` | Last run got a login redirect | Stop; alert operator |
+| `expired` | Last run got a login redirect | Raise `SessionExpiredError`; alert operator. HTTP layer returns 503. |
 
 **Cookie lifetime:** Eversports admin session cookies are long-lived (observed TTL ~30 days). The operator re-exports approximately once a month. Future work (post-v1) may automate cookie refresh via a browser extension or headless re-login if Eversports provides a service-account path.
 
@@ -107,15 +107,25 @@ Eversports admin login requires TOTP 2FA via an authenticator app. Automated ema
 
 ### Read sources
 
-| Source | Endpoint | Used for |
-|---|---|---|
-| Admin CSV — Active appointments | `?export=active` | Customer roster + today's bookings · drives event-driven schedule |
-| Admin CSV — All appointments | `?export=all` | Full booking history (30-day window kept in Postgres, summary in GHL) |
-| Admin CSV — Booking list | `?export=booking-list` | Package/session usage per booking |
-| Admin endpoint — Active products & memberships | (separate endpoint) | Product detection + categorisation |
-| Admin CSV — Activities (all) | Activities admin export | Activity schedule + capacity. Drives both the event-driven trigger time grid AND the UC05 availability check. Columns `Max. Teilnehmer` (capacity) and `Angemeldet` (registered) yield `available_spots = Max. Teilnehmer − Angemeldet` |
+All Eversports data is fetched via direct API calls using an authenticated Playwright
+`BrowserContext` (cookie-export auth).  No page navigation is required for any of the
+data exports below.
 
-**Note:** the Eversports Provider API (GraphQL) is **NOT used by this product.** All Eversports ingress is via admin panel scraping.
+| Source | API endpoint | Content-type | Used for |
+|---|---|---|---|
+| **Facility metadata** | `GET /api/admin-facilities?facilityShortId={companyId}` | `application/json` | Resolve numeric `facilityId` required by all other endpoints |
+| **Booking list** | `GET /api/event/export-booking-list?facilityId={id}&fromDate={YYYY-MM-DD}&toDate={YYYY-MM-DD}` → JSON `{"url":"<presigned_S3_url>"}` → fetch presigned URL | `application/ms-excel` (UTF-8 BOM CSV) | Full booking history (rolling 30-day window); seeds `contacts`, `bookings` tables |
+| **Scheduler / activities** | `GET /api/scheduler/list/download?facilityId={id}&fromDate={date}&toDate={date}&exportType=active` | `text/csv` (UTF-8 BOM) | Activity schedule + capacity; seeds `sessions`; drives UC05 availability |
+| **Per-session participants** | `GET /api/event/participant/list/download?facilityId={id}&sessionId={id}` | `text/csv` | Session-level participant roster; used by future event-driven UC01 |
+
+**Note:** the Eversports Provider API (GraphQL) is **NOT used by this product.** All
+Eversports ingress is via admin panel scraping (`app/scrapers/admin_csv.py`).
+
+**Endpoint discovery:** endpoints were reverse-engineered by probing the Eversports SPA
+(2026-05-27) with `scripts/probe_live_scraper.py` and `scripts/probe_booking_list.py`.
+The booking-list response is a JSON wrapper containing a pre-signed S3 URL; the actual
+CSV is behind that URL and matches the `bookings.csv` sample format exactly (15 columns,
+English headers, semicolon-delimited, double-quoted).
 
 ### One-time historical sync (runs once per location on setup)
 
@@ -129,15 +139,16 @@ Both modes share the same downstream steps (consent invitation, tag/pipeline ini
 
 ```python
 historical_sync_flag = read from config
-if historical_sync_flag == "complete":
+if historical_sync_flag in ("complete", "bootstrapped"):
   → skip, proceed to event-driven sync
 else:
   if csv_bootstrap_uploaded:
     → run CSV bootstrap (see "One-Time CSV Bootstrap Protocol" below)
+    → set historical_sync_flag = "bootstrapped"
   else:
     → run scraper historical sweep for past 30 days + future 14 days schedule
+    → set historical_sync_flag = "complete"
   → enqueue legacy consent invitation for each imported contact
-  → set historical_sync_flag = "complete"
 ```
 
 ---
@@ -290,7 +301,9 @@ Schema not seen in this sample upload. Per Eversports docs the columns are: Cust
 
 7. WRITE bootstrap_result with counts, errors, warnings → Postgres
 
-8. MARK historical_sync_flag = "complete"
+8. MARK historical_sync_flag = "bootstrapped"
+   (The scraper's historical_backfill run type sets it to "complete" — see sync_runner.py.
+   Both values signal that historical seeding is done and event-driven sync can start.)
 
 9. UNBLOCK event-driven scheduler for this location
 ```
@@ -769,16 +782,16 @@ After each sync run, append a row to `sync_log` and emit metrics to monitoring:
 | Column | Value |
 |---|---|
 | `run_timestamp` | Start time |
-| `run_type` | event-driven / hourly-catchup / overnight / historical |
+| `run_type` | M1.5/M2 implemented values: `bootstrap` · `incremental` · `historical_backfill` · `scrape_error`. M4+ planned: `event-driven` · `hourly-catchup` · `overnight`. |
 | `contacts_processed` | Total Eversports customers in reports |
-| `contacts_updated_ghl` | Contacts where GHL fields changed |
-| `contacts_created_ghl` | New GHL contacts |
+| `contacts_updated` | Contacts where local fields changed |
 | `tags_applied` | Apply ops |
-| `tags_removed` | Remove ops |
 | `pipeline_moves` | Stage changes |
-| `errors` | Count |
-| `error_details` | JSON list |
-| `run_duration_seconds` | Total time |
+| `errors` | JSON list of error message strings |
+| `bootstrap_run_id` | UUID linking this log entry to the bootstrap run (nullable) |
+| `duration_seconds` | Total time in seconds (numeric) |
+| `created_at` | Row creation timestamp |
+| *(M3+ deferred)* | `contacts_updated_ghl`, `contacts_created_ghl`, `tags_removed`, `writeback_jobs_processed`, `writeback_jobs_failed` |
 | `writeback_jobs_processed` | Completed in window |
 | `writeback_jobs_failed` | Failed in window |
 
@@ -839,26 +852,40 @@ After 3 retries with backoff, mark `dead`, apply `writeback-failed` tag, fire ow
 ```python
 def is_trial(name_or_type):
   s = str(name_or_type).lower()
-  return any(k in s for k in ("trial", "probe", "probestunde", "proba", "introductory"))
+  return any(k in s for k in (
+      "trial", "probe", "probestunde", "schnupper", "intro", "introductory",
+      "einführung", "einfuhrung", "starter"
+  ))
 
 def is_membership(name_or_type):
   s = str(name_or_type).lower()
-  return any(k in s for k in ("membership", "mitgliedschaft", "abo", "subscription"))
+  return any(k in s for k in (
+      "mitgliedschaft", "membership", " abo", "abo-", "abonnement",
+      "flatrate", "flat rate", "subscription"
+  ))
 
 def is_voucher(name_or_type):
   s = str(name_or_type).lower()
-  return any(k in s for k in ("voucher", "gutschein", "gift"))
+  return any(k in s for k in ("gutschein", "voucher", "geschenk", "gift"))
 
 def is_merch(name_or_type):
   s = str(name_or_type).lower()
-  return any(k in s for k in ("merch", "shirt", "bottle", "towel", "article"))
+  return any(k in s for k in ("shirt", "mat", "matte", "towel", "handtuch", "merchandise", "merch"))
 
 def is_card(name_or_type):
-  if is_trial(name_or_type): return False
-  if is_membership(name_or_type): return False
-  if is_voucher(name_or_type): return False
-  if is_merch(name_or_type): return False
-  return True
+  # See also: "Updated helper: explicit-positive is_card" above — this section
+  # reflects the implementation in app/ingest/classifier.py as of M1.5.
+  s = str(name_or_type).lower()
+  if any(k in s for k in ("karte", "card", "pack", "credits", "punktekarte")):
+    if is_trial(name_or_type):
+      return False
+    return True
+  return (
+    not is_trial(name_or_type)
+    and not is_membership(name_or_type)
+    and not is_voucher(name_or_type)
+    and not is_merch(name_or_type)
+  )
 ```
 
 Per-location overrides in `locations.product_keyword_map` JSON.
@@ -898,7 +925,7 @@ Per-location overrides in `locations.product_keyword_map` JSON.
 | `eversports_cookie_state` | Scraper session state. `unset` (no cookies imported), `ok` (last run authenticated successfully), `expired` (last run got a login redirect — operator must re-export). Default `unset`. | `ok` |
 | `timezone` | IANA timezone | `Europe/Vienna` |
 | `country` | ISO 3166-1 alpha-2 country code. Used as `default_region` for phone normalisation (libphonenumber). DACH only: `DE`, `AT`, `CH`. Default `DE`. | `AT` |
-| `historical_sync_flag` | Whether 30-day historical sync has run | `complete` / `pending` |
+| `historical_sync_flag` | Whether 30-day historical sync has run | `pending` (default) / `bootstrapped` (CSV bootstrap completed) / `complete` (scraper historical_backfill completed) |
 | `late_cancel_window_hours` | Studio policy | `24` |
 | `studio_owner_email` | Notifications | `owner@studio.com` |
 | `studio_name` | AI prompts | `Flow Pilates` |

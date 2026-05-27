@@ -1,84 +1,93 @@
 """
-AdminCsvDownloader — downloads the Eversports admin CSV exports.
+AdminApiClient — direct API client for Eversports admin data exports.
 
-Each method navigates to an admin export URL using a Playwright Page from
-EversportsBaseScraper, waits for the download (or direct response body), and
-returns the raw bytes.
+Replaces the old AdminCsvDownloader that mistakenly targeted non-existent bulk
+export URLs (/admin/{id}/bookings?export=csv, /admin/{id}/activities?export=csv).
 
-URL patterns (discovered from admin panel + spec §Layer 1 Read sources):
+All endpoints were discovered via live probing on 2026-05-27 against Studio
+Stuttgart (Yneu3U, facilityId 78034):
 
-  Bookings (booking list CSV):
-    GET /admin/{studio_id}/bookings?export=csv
-    → Returns the bookings list CSV (English headers, semicolon-delimited, quoted).
-      Corresponds to the ``bookings.csv`` sample export.
+  Facility metadata
+    GET /api/admin-facilities?facilityShortId={companyId}
+    → JSON {"facilities": [{"id": 78034, "name": "...", ...}]}
+    Used to obtain the numeric facilityId required by all other endpoints.
 
-  Activities (all activities CSV):
-    GET /admin/{studio_id}/activities?export=csv
-    → Returns the activities export (German headers, semicolon-delimited, unquoted).
-      Corresponds to the ``all activities.csv`` sample export.
+  Booking list export  (matches requirements_v2/sample_exports/bookings.csv)
+    GET /api/event/export-booking-list
+        ?facilityId={id}&fromDate={YYYY-MM-DD}&toDate={YYYY-MM-DD}
+    → JSON {"url": "https://s3.eu-central-1.amazonaws.com/...presigned..."}
+    → Fetch presigned URL → text/csv (English headers, semicolon-delimited,
+      double-quoted, UTF-8 BOM, ``application/ms-excel`` content-type)
+    Columns: Start; End; Activity name; Location; Trainer nickname;
+             Customer number; First name; Last name; E-Mail; Clubgroup name;
+             Newsletter; Product name; Price; Attended; Phone number
 
-  Active appointments:
-    GET /admin/{studio_id}/bookings?export=active
-    → Filtered bookings export — today's/upcoming active appointments only.
+  Scheduler / activities export  (matches sample_exports/all activities.csv)
+    GET /api/scheduler/list/download
+        ?facilityId={id}&fromDate={YYYY-MM-DD}&toDate={YYYY-MM-DD}&exportType=active
+    → text/csv  (German headers, semicolon-delimited, unquoted, UTF-8 BOM)
+    Columns: Typ; Datum; Startzeit; Endzeit; Name; Angemeldet; Anwesend;
+             Max. Teilnehmer; Warteliste; Trainer; Ort; Status; Sport;
+             Aktivitätsgruppe; Kommentar zur Einheit; Veröffentlicht
 
-  No-shows:
-    GET /admin/{studio_id}/bookings?export=no-show-all
-    → NOTE: per spec v2, the no-show export is NOT used (UC03 removed in v2).
-      The download_noshows method is retained for completeness but callers
-      should not invoke it in normal sync runs.
+  Per-session participant list  (UC1 session-level data, not used by bootstrap)
+    GET /api/event/participant/list/download
+        ?facilityId={id}&sessionId={sessionId}
+    → text/csv  (German headers, semicolon-delimited, unquoted)
 
-Download behaviour:
-  Some Eversports export buttons trigger a file download (Content-Disposition:
-  attachment) rather than rendering the CSV inline.  Playwright's
-  ``page.expect_download()`` context manager is used to capture these.
-  For endpoints that respond with inline CSV bodies, we fall back to reading
-  the response body directly via page.goto() + page.content().
+All requests use ``BrowserContext.request.get()`` — no page navigation required.
+The Playwright browser context carries the injected session cookies so requests
+are authenticated without any login flow.
 
-  Both patterns are handled per-method based on observed behaviour.
-
-IMPORTANT — admin URL detection:
-  The ``eversports_studio_id`` in the locations table is the short company code
-  that appears in the Eversports admin URL (e.g. "Yneu3U").  All admin export
-  URLs are under ``/admin/{studio_id}/...``.
+Session expiry detection:
+  HTTP 401/403 → raise SessionExpiredError
+  HTML body (text/html) on an API endpoint → raise SessionExpiredError
+  HTTP 200 with expected content-type → success
 
 References:
-  - PoC scraper.js §detectFacilityInfo — uses /admin/{companyId}/classes
-  - spec 07_foundation_layer.md §Layer 1 Read sources
-  - sample_exports/ — ground-truth CSV shapes
+  - scripts/probe_live_scraper.py — working probe confirming all endpoints
+  - scripts/probe_booking_list.py — confirmed bookings format (318 KB, 15 cols)
+  - reference/eversports_scraping_poc/src/scraper.js — original PoC (Node.js)
+  - requirements_v2/07_foundation_layer.md §Layer 1 Read sources
 """
 
 from __future__ import annotations
 
+import json
 import logging
+from datetime import date, timedelta
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
-    from playwright.async_api import Page
+    from playwright.async_api import BrowserContext
 
 from app.db.models.location import Location
 from app.scrapers.base import EversportsBaseScraper
+from app.scrapers.exceptions import SessionExpiredError
 
 logger = logging.getLogger(__name__)
 
-# Default timeout for navigation + download in milliseconds
-_NAV_TIMEOUT_MS = 30_000
-_DOWNLOAD_TIMEOUT_MS = 60_000
+# Request timeout for all API calls (milliseconds)
+_API_TIMEOUT_MS = 30_000
 
-# Content-type snippets that indicate a direct CSV response body
-_CSV_CONTENT_TYPES = ("text/csv", "application/csv", "text/plain", "application/octet-stream")
+# Eversports admin API base URL
+_BASE_URL = "https://app.eversportsmanager.com"
 
 
-class AdminCsvDownloader:
+class AdminApiClient:
     """
-    Downloads Eversports admin CSV exports.
+    Direct API client for Eversports admin data exports.
 
-    Each method accepts nothing (uses the scraper's browser context internally)
-    and returns the raw ``bytes`` of the CSV file.
+    Uses ``BrowserContext.request.get()`` to call Eversports JSON/CSV endpoints
+    with the authenticated browser context (cookie injection, no page navigation).
+
+    This replaces the old ``AdminCsvDownloader`` that attempted to use page
+    navigation and file download events against endpoints that do not exist.
 
     Raises:
-        RuntimeError: if the download fails or the response is empty.
-        SessionExpiredError: if a login redirect is detected mid-download
-            (raised by the scraper's response listener).
+        SessionExpiredError: if any API call returns HTTP 401/403 or an HTML
+            response body (indicating a login redirect on the final URL).
+        RuntimeError: if an API call fails for any other reason.
     """
 
     def __init__(self, scraper: EversportsBaseScraper, location: Location) -> None:
@@ -87,208 +96,263 @@ class AdminCsvDownloader:
 
     # ── Internal helpers ───────────────────────────────────────────────────────
 
-    def _build_admin_url(self, path: str) -> str:
-        """Construct a full admin URL for the given path."""
-        studio_id = self._location.eversports_studio_id
-        return f"{self._scraper.BASE_URL}/admin/{studio_id}/{path}"
+    @property
+    def _ctx(self) -> BrowserContext:
+        return self._scraper.context
 
-    async def _download_csv_via_export_button(
-        self,
-        page: Page,
-        export_url: str,
-        *,
-        label: str,
-    ) -> bytes:
+    def _check_session(self, status: int, content_type: str, body_prefix: bytes) -> None:
         """
-        Navigate to ``export_url``.
+        Raise ``SessionExpiredError`` if the response indicates an expired session.
 
-        Two behaviours are possible:
-        1. The URL directly returns a CSV response body (most common for
-           Eversports export endpoints when called with ``?export=csv``).
-           Detected by content-type header.
-        2. The URL triggers a file download (Content-Disposition: attachment).
-           Detected by the download event.
-
-        We use ``expect_download()`` as the primary strategy because it handles
-        both: a download event fires for attachment responses, and for inline
-        responses we fall back to reading response.body() from the navigation.
+        Checks:
+          1. HTTP 401 or 403 → explicit authentication failure.
+          2. ``text/html`` content-type on an API endpoint → login-page redirect
+             (Playwright follows 302 redirects, ending at the login HTML page).
+          3. HTML body prefix heuristic (for cases where content-type is absent).
         """
-        logger.info("csv_downloader: fetching %s [%s]", export_url, label)
+        if status in (401, 403):
+            raise SessionExpiredError(
+                "Eversports API returned HTTP {status} — session expired. "
+                "Re-export cookies and run scripts/import_cookies.py"
+            )
+        if "text/html" in content_type:
+            raise SessionExpiredError(
+                "Eversports API returned HTML (expected JSON/CSV) — session may be "
+                "expired. Re-export cookies and run scripts/import_cookies.py"
+            )
+        if body_prefix.lstrip().startswith((b"<!DOCTYPE", b"<html", b"<!doctype")):
+            raise SessionExpiredError(
+                "Eversports API returned HTML body — session may be expired. "
+                "Re-export cookies and run scripts/import_cookies.py"
+            )
 
-        # Strategy 1: use expect_download() — handles Content-Disposition: attachment
+    async def _get(self, url: str, *, label: str) -> bytes:
+        """
+        Perform an authenticated GET request via the browser context.
+
+        Args:
+            url: Full URL to fetch.
+            label: Log label for diagnostics.
+
+        Returns:
+            Raw response body bytes (HTTP 200 only).
+
+        Raises:
+            SessionExpiredError: on 401/403 or HTML response.
+            RuntimeError: on non-200 status (other than 401/403).
+        """
+        logger.info("api_client: GET %s [%s]", url, label)
         try:
-            async with page.expect_download(timeout=_DOWNLOAD_TIMEOUT_MS) as download_info:
-                response = await page.goto(
-                    export_url,
-                    timeout=_NAV_TIMEOUT_MS,
-                    wait_until="commit",  # don't wait for full page load — CSV is streamed
-                )
+            resp = await self._ctx.request.get(url, timeout=_API_TIMEOUT_MS)
+        except Exception as exc:
+            raise RuntimeError(f"api_client: request failed for {label}: {exc}") from exc
 
-            download = await download_info.value
-            download_path = await download.path()
+        status = resp.status
+        content_type = resp.headers.get("content-type", "")
+        body = bytes(await resp.body())
 
-            if download_path is None:
-                failure = download.failure()
-                raise RuntimeError(
-                    f"csv_downloader: download path is None for {label}; "
-                    f"failure={failure}"
-                )
+        self._check_session(status, content_type, body[:64])
 
-            with open(download_path, "rb") as fh:
-                data = fh.read()
-
-            if not data:
-                raise RuntimeError(
-                    f"csv_downloader: downloaded file is empty for {label}"
-                )
-
-            logger.info(
-                "csv_downloader: downloaded %d bytes via download event [%s]",
-                len(data),
-                label,
-            )
-            return data
-
-        except Exception as download_exc:
-            # Strategy 2: the response body was served inline (no download event).
-            # Re-navigate and read the raw body.
-            logger.debug(
-                "csv_downloader: download event not fired for %s (%s), "
-                "falling back to inline body",
-                label,
-                download_exc,
-            )
-
-        # Fallback: direct navigation, read body from response
-        response = await page.goto(
-            export_url,
-            timeout=_NAV_TIMEOUT_MS,
-            wait_until="commit",
-        )
-
-        if response is None:
+        if status != 200:
             raise RuntimeError(
-                f"csv_downloader: no response for {export_url} [{label}]"
+                f"api_client: HTTP {status} for {label}  url={url}"
             )
 
-        status = response.status
-        if status not in (200, 204):
-            raise RuntimeError(
-                f"csv_downloader: HTTP {status} for {export_url} [{label}]"
-            )
-
-        content_type = response.headers.get("content-type", "")
-        if not any(ct in content_type for ct in _CSV_CONTENT_TYPES):
-            # Check if it's a login page (additional guard on top of the listener)
-            if "/login" in page.url:
-                from app.scrapers.exceptions import SessionExpiredError  # noqa: PLC0415
-
-                raise SessionExpiredError(
-                    "Eversports session expired — please re-export cookies and run "
-                    "scripts/import_cookies.py"
-                )
-            logger.warning(
-                "csv_downloader: unexpected content-type '%s' for %s [%s]",
-                content_type,
-                export_url,
-                label,
-            )
-
-        data = await response.body()
-
-        if not data:
-            raise RuntimeError(
-                f"csv_downloader: response body is empty for {export_url} [{label}]"
-            )
-
-        logger.info(
-            "csv_downloader: received %d bytes via inline response [%s]",
-            len(data),
+        logger.debug(
+            "api_client: %s  HTTP 200  ct=%r  len=%d",
             label,
+            content_type,
+            len(body),
         )
-        return data
+        return body
 
-    # ── Public download methods ────────────────────────────────────────────────
+    # ── Public API methods ─────────────────────────────────────────────────────
 
-    async def download_bookings(self) -> bytes:
+    async def get_facility_id(self, company_id: str) -> int:
+        """
+        Fetch the numeric facilityId for a studio.
+
+        Args:
+            company_id: The short studio code from the admin URL (e.g. ``"Yneu3U"``).
+                Stored in ``locations.eversports_studio_id``.
+
+        Returns:
+            Numeric facility ID (e.g. ``78034``).
+
+        Raises:
+            RuntimeError: if the facilities endpoint returns no facilities.
+            SessionExpiredError: if the session is expired.
+        """
+        url = f"{_BASE_URL}/api/admin-facilities?facilityShortId={company_id}"
+        body = await self._get(url, label="facilities")
+
+        try:
+            data = json.loads(body)
+        except json.JSONDecodeError as exc:
+            raise RuntimeError(
+                f"api_client: facilities endpoint returned non-JSON body: {body[:200]!r}"
+            ) from exc
+
+        facilities = data.get("facilities", [])
+        if not facilities:
+            raise RuntimeError(
+                f"api_client: no facilities found for companyId={company_id!r}"
+            )
+
+        facility_id: int = facilities[0]["id"]
+        logger.info(
+            "api_client: facilityId=%d for companyId=%s",
+            facility_id,
+            company_id,
+        )
+        return facility_id
+
+    async def download_bookings(
+        self,
+        facility_id: int,
+        from_date: str,
+        to_date: str,
+    ) -> bytes:
         """
         Download the booking list CSV export.
 
-        Admin URL: /admin/{studio_id}/bookings?export=csv
+        Calls ``/api/event/export-booking-list`` which returns JSON containing a
+        pre-signed S3 URL.  Fetches the S3 URL to obtain the actual CSV.
 
         Returns the same format as ``requirements_v2/sample_exports/bookings.csv``:
         UTF-8 with BOM, semicolon-delimited, double-quoted, English headers,
         dates as ``DD/MM/YYYY HH:MM``.
 
-        This is the 30-day window booking history export.
+        Args:
+            facility_id: Numeric facility ID (from ``get_facility_id()``).
+            from_date: Start date in ``YYYY-MM-DD`` format.
+            to_date: End date in ``YYYY-MM-DD`` format (inclusive).
+
+        Returns:
+            Raw CSV bytes.
         """
-        page = await self._scraper.new_page()
+        api_url = (
+            f"{_BASE_URL}/api/event/export-booking-list"
+            f"?facilityId={facility_id}&fromDate={from_date}&toDate={to_date}"
+        )
+        body = await self._get(api_url, label="booking_list_json")
+
         try:
-            url = self._build_admin_url("bookings") + "?export=csv"
-            return await self._download_csv_via_export_button(page, url, label="bookings")
-        finally:
-            await page.close()
+            js = json.loads(body)
+        except json.JSONDecodeError as exc:
+            raise RuntimeError(
+                f"api_client: booking-list endpoint returned non-JSON: {body[:200]!r}"
+            ) from exc
 
-    async def download_activities(self) -> bytes:
+        presigned_url: str | None = (
+            js.get("url")
+            or js.get("downloadUrl")
+            or js.get("fileUrl")
+            or js.get("link")
+        )
+        if not presigned_url:
+            raise RuntimeError(
+                f"api_client: booking-list JSON has no presigned URL. keys={list(js.keys())}"
+            )
+
+        logger.info("api_client: fetching presigned booking CSV URL")
+        csv_bytes = await self._get(presigned_url, label="booking_list_csv")
+
+        if not csv_bytes:
+            raise RuntimeError("api_client: booking-list presigned URL returned empty body")
+
+        logger.info(
+            "api_client: bookings CSV downloaded  %d bytes  from=%s  to=%s",
+            len(csv_bytes),
+            from_date,
+            to_date,
+        )
+        return csv_bytes
+
+    async def download_activities(
+        self,
+        facility_id: int,
+        from_date: str,
+        to_date: str,
+    ) -> bytes:
         """
-        Download the activities (all) CSV export.
+        Download the activities (scheduler) CSV export.
 
-        Admin URL: /admin/{studio_id}/activities?export=csv
+        Calls ``/api/scheduler/list/download`` which returns the CSV directly.
 
         Returns the same format as
         ``requirements_v2/sample_exports/all activities.csv``:
-        UTF-8 with BOM, semicolon-delimited, unquoted, German headers,
-        dates as ``DD.MM.YYYY`` + separate ``HH:MM`` column.
+        UTF-8 with BOM, semicolon-delimited, unquoted, German headers.
+
+        Columns: Typ; Datum; Startzeit; Endzeit; Name; Angemeldet; Anwesend;
+        Max. Teilnehmer; Warteliste; Trainer; Ort; Status; Sport;
+        Aktivitätsgruppe; Kommentar zur Einheit; Veröffentlicht
 
         The ``Max. Teilnehmer`` and ``Angemeldet`` columns drive UC05
         availability: ``available_spots = Max. Teilnehmer − Angemeldet``.
+
+        Args:
+            facility_id: Numeric facility ID (from ``get_facility_id()``).
+            from_date: Start date in ``YYYY-MM-DD`` format.
+            to_date: End date in ``YYYY-MM-DD`` format (inclusive).
+
+        Returns:
+            Raw CSV bytes.
         """
-        page = await self._scraper.new_page()
-        try:
-            url = self._build_admin_url("activities") + "?export=csv"
-            return await self._download_csv_via_export_button(page, url, label="activities")
-        finally:
-            await page.close()
-
-    async def download_active_appointments(self) -> bytes:
-        """
-        Download the active appointments CSV export.
-
-        Admin URL: /admin/{studio_id}/bookings?export=active
-
-        Used by the event-driven scheduler to compute today's class end times.
-        Same format as bookings export, filtered to active/upcoming bookings only.
-        """
-        page = await self._scraper.new_page()
-        try:
-            url = self._build_admin_url("bookings") + "?export=active"
-            return await self._download_csv_via_export_button(
-                page, url, label="active_appointments"
-            )
-        finally:
-            await page.close()
-
-    async def download_noshows(self) -> bytes:
-        """
-        Download the no-shows CSV export.
-
-        Admin URL: /admin/{studio_id}/bookings?export=no-show-all
-
-        NOTE: Per spec v2 (07_foundation_layer.md), the no-show export is NOT
-        used in UC03 (UC03 removed in v2).  This method is retained for
-        completeness but the sync_runner does NOT call it in normal operation.
-
-        The ``noshows.csv`` sample in sample_exports/ is 0 bytes, confirming
-        the studio has no no-shows in the export window.
-        """
-        logger.warning(
-            "csv_downloader: download_noshows() called — "
-            "no-show export is NOT used in v2 (UC03 removed). "
-            "This call should be removed from the caller."
+        url = (
+            f"{_BASE_URL}/api/scheduler/list/download"
+            f"?facilityId={facility_id}&fromDate={from_date}&toDate={to_date}"
+            "&exportType=active"
         )
-        page = await self._scraper.new_page()
-        try:
-            url = self._build_admin_url("bookings") + "?export=no-show-all"
-            return await self._download_csv_via_export_button(page, url, label="noshows")
-        finally:
-            await page.close()
+        csv_bytes = await self._get(url, label="activities_csv")
+
+        if not csv_bytes:
+            raise RuntimeError("api_client: activities CSV endpoint returned empty body")
+
+        logger.info(
+            "api_client: activities CSV downloaded  %d bytes  from=%s  to=%s",
+            len(csv_bytes),
+            from_date,
+            to_date,
+        )
+        return csv_bytes
+
+    async def download_participant_csv(
+        self,
+        facility_id: int,
+        session_id: str | int,
+    ) -> bytes:
+        """
+        Download the per-session participant CSV.
+
+        Returns semicolon-delimited CSV with German headers:
+        Kundennummer; Nachname; Vorname; E-Mail-Adresse; Clubgroup name;
+        Marketing Kommunikation; Telefonnummer; Alter; Geburtsdatum; Land;
+        PLZ; city; Strasse; Kommentar; Notiz; Warnung; Klasse; Optionen;
+        Texte; Produkt; Gesamtpreis; Zahlungsstatus; Aggregator
+
+        NOTE: This method is provided for completeness and future event-driven
+        use cases (UC01 trial follow-up — identifying participants of specific
+        sessions).  The main sync pipeline uses ``download_bookings()`` instead,
+        which returns pre-merged session + participant data.
+
+        Args:
+            facility_id: Numeric facility ID (from ``get_facility_id()``).
+            session_id: Numeric session/event ID (``eventSessionId`` from the
+                ``tr.js_quick-data[data-eventsession]`` DOM attribute).
+
+        Returns:
+            Raw CSV bytes.
+        """
+        url = (
+            f"{_BASE_URL}/api/event/participant/list/download"
+            f"?facilityId={facility_id}&sessionId={session_id}"
+        )
+        csv_bytes = await self._get(url, label=f"participants/session={session_id}")
+
+        logger.info(
+            "api_client: participant CSV downloaded  %d bytes  session=%s",
+            len(csv_bytes),
+            session_id,
+        )
+        return csv_bytes

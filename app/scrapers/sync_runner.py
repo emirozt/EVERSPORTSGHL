@@ -4,28 +4,43 @@ Sync runner — full Eversports → Postgres sync for one location.
 Orchestrates:
   1. Load location from DB; validate cookie_state.
   2. Open EversportsBaseScraper context (injects cookies, launches Playwright).
-  3. Download all CSVs via AdminCsvDownloader.
-  4. Call run_bootstrap() from app/ingest/bootstrap.py with the downloaded bytes.
+  3. Resolve numeric facilityId via AdminApiClient.get_facility_id().
+  4. Download bookings CSV and activities CSV via AdminApiClient.
+  5. Call run_bootstrap() from app/ingest/bootstrap.py with the downloaded bytes.
      (bootstrap is already idempotent — re-running on the same data is safe.)
-  5. Mark scraper._mark_ok() (sets cookie_state = 'ok').
-  6. Return BootstrapResult + run metadata.
+  6. Mark scraper._mark_ok() (sets cookie_state = 'ok').
+  7. Return BootstrapResult + run metadata.
+
+API endpoints used (all direct API calls — no page navigation required):
+  facilityId lookup:  GET /api/admin-facilities?facilityShortId={companyId}
+  Bookings CSV:       GET /api/event/export-booking-list
+                          ?facilityId={id}&fromDate={date}&toDate={date}
+                      → JSON {"url": "<presigned_s3_url>"}
+                      → fetch presigned URL → CSV matching bookings.csv format
+  Activities CSV:     GET /api/scheduler/list/download
+                          ?facilityId={id}&fromDate={date}&toDate={date}&exportType=active
+                      → direct text/csv matching "all activities.csv" format
+
+Date window:
+  Both exports use a rolling 30-day window (today − 30 days → today).
+  This is computed at run time so incremental and historical_backfill runs
+  both cover the same window — the distinction lies in the historical_sync_flag.
 
 Run types:
   ``incremental``  (default):
-    Downloads bookings + activities.  Suitable for hourly/event-driven runs.
-    Also downloads active_appointments to refresh the event-driven schedule.
+    Downloads bookings + activities for the last 30 days.
+    Suitable for hourly/event-driven runs.
 
   ``historical_backfill``:
-    Same as incremental but signals to the caller that this is the Mode B
-    first-run sweep.  The bookings export covers the full 30-day window by
-    default (no date-range change is needed — Eversports exports the configured
-    window on every export).  On success, sets historical_sync_flag = 'complete'.
+    Identical download logic; on success sets historical_sync_flag = 'complete'.
+    This signals that the Mode B first-run sweep is done.
 
 The sync_runner does NOT implement the no-show export download (UC03 removed
-in v2).  run_bootstrap() receives ``noshows_bytes=None`` for scraper runs.
+in v2).  run_bootstrap() receives ``noshows_bytes=None`` for all scraper runs.
 
 Error handling:
   - SessionExpiredError from the scraper propagates up unchanged.
+  - facilityId lookup failure aborts the run (we can't download anything without it).
   - Download errors for individual reports are caught; partial results are
     still persisted (spec §Partial report failure: "update only fields sourced
     from successfully downloaded reports").
@@ -34,6 +49,7 @@ Error handling:
 See:
   - requirements_v2/07_foundation_layer.md §Layer 1, §Sync Log
   - app/ingest/bootstrap.py — the persistence layer (idempotent upserts)
+  - app/scrapers/admin_csv.py — AdminApiClient (API endpoints + format details)
 """
 
 from __future__ import annotations
@@ -41,6 +57,7 @@ from __future__ import annotations
 import logging
 import time
 import uuid
+from datetime import date, timedelta
 from typing import Any
 
 from sqlalchemy import select, update
@@ -49,11 +66,22 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.db.models.location import Location
 from app.db.models.sync_log import SyncLog
 from app.ingest.bootstrap import BootstrapResult, run_bootstrap
-from app.scrapers.admin_csv import AdminCsvDownloader
+from app.scrapers.admin_csv import AdminApiClient
 from app.scrapers.base import EversportsBaseScraper
 from app.scrapers.exceptions import SessionExpiredError
 
 logger = logging.getLogger(__name__)
+
+# Rolling window for both bookings and activities exports
+_EXPORT_WINDOW_DAYS = 30
+
+
+def _date_range(window_days: int = _EXPORT_WINDOW_DAYS) -> tuple[str, str]:
+    """Return (from_date, to_date) as ``YYYY-MM-DD`` strings for the export window."""
+    today = date.today()
+    from_date = (today - timedelta(days=window_days)).isoformat()
+    to_date = today.isoformat()
+    return from_date, to_date
 
 
 async def run_sync(
@@ -82,8 +110,7 @@ async def run_sync(
 
     if run_type not in ("incremental", "historical_backfill"):
         raise ValueError(
-            f"Invalid run_type={run_type!r}. "
-            "Must be 'incremental' or 'historical_backfill'."
+            f"Invalid run_type={run_type!r}. Must be 'incremental' or 'historical_backfill'."
         )
 
     # ── Step 1: Load location ──────────────────────────────────────────────────
@@ -99,28 +126,84 @@ async def run_sync(
         location.eversports_cookie_state,
     )
 
-    # Pre-flight cookie state check — fail fast before launching a browser
+    # Pre-flight cookie state check — fail fast before launching a browser.
+    #
+    # 'unset' = location created but never onboarded.  The scheduled sweep may
+    # encounter these; skip them quietly so one un-configured location does not
+    # abort the entire batch.  The HTTP endpoint handles this path at 400 before
+    # run_sync is called.
+    #
+    # 'expired' = was working but session timed out → operator must act → raise.
     cookie_no_cache = not location.eversports_cookie_cache
-    if location.eversports_cookie_state in ("unset", "expired") or cookie_no_cache:
+    if location.eversports_cookie_state == "unset" or cookie_no_cache:
+        logger.warning(
+            "sync_runner: location_id=%s not onboarded (cookie_state=%s) — skipping",
+            location_id,
+            location.eversports_cookie_state,
+        )
+        return {
+            "run_type": run_type,
+            "skipped": True,
+            "skip_reason": "not_onboarded",
+            "contacts_seeded": 0,
+            "bookings_seeded": 0,
+            "sessions_seeded": 0,
+            "products_discovered": [],
+            "contacts_missing_email": 0,
+            "contacts_invalid_phone": 0,
+            "warnings": [],
+            "errors": [],
+            "scraper_duration_seconds": 0.0,
+        }
+
+    if location.eversports_cookie_state == "expired":
         raise SessionExpiredError(
             "Eversports session expired — please re-export cookies and run "
             "scripts/import_cookies.py"
         )
 
-    # ── Steps 2–3: Download CSVs ───────────────────────────────────────────────
+    # ── Steps 2–4: Fetch data via AdminApiClient ───────────────────────────────
     bookings_bytes: bytes | None = None
     activities_bytes: bytes | None = None
     download_errors: list[str] = []
 
-    async with EversportsBaseScraper(location, db) as scraper:
-        downloader = AdminCsvDownloader(scraper, location)
+    from_date, to_date = _date_range()
+    logger.info(
+        "sync_runner: export window from=%s to=%s",
+        from_date,
+        to_date,
+    )
 
-        # Download bookings CSV — required
+    async with EversportsBaseScraper(location, db) as scraper:
+        client = AdminApiClient(scraper, location)
+
+        # Step 3: Resolve numeric facilityId (required for all export calls)
         try:
-            bookings_bytes = await downloader.download_bookings()
-            logger.info(
-                "sync_runner: bookings downloaded %d bytes", len(bookings_bytes)
+            facility_id = await client.get_facility_id(location.eversports_studio_id)
+            logger.info("sync_runner: facilityId=%d", facility_id)
+        except SessionExpiredError:
+            raise
+        except Exception as exc:  # noqa: BLE001
+            # Without facilityId we can't download anything — abort early
+            duration = time.monotonic() - run_start
+            msg = f"facilityId lookup failed: {exc}"
+            logger.error("sync_runner: %s", msg, exc_info=True)
+            _write_error_sync_log(
+                db=db,
+                location_id=location_id,
+                run_type=run_type,
+                errors=[msg],
+                duration=duration,
             )
+            raise RuntimeError(
+                f"sync_runner: cannot proceed without facilityId for "
+                f"location_id={location_id}. {msg}"
+            ) from exc
+
+        # Step 4a: Download bookings CSV — required
+        try:
+            bookings_bytes = await client.download_bookings(facility_id, from_date, to_date)
+            logger.info("sync_runner: bookings downloaded %d bytes", len(bookings_bytes))
         except SessionExpiredError:
             raise  # Let it propagate — session is expired, nothing more to do
         except Exception as exc:  # noqa: BLE001
@@ -128,23 +211,16 @@ async def run_sync(
             logger.error("sync_runner: %s", msg, exc_info=True)
             download_errors.append(msg)
 
-        # Download activities CSV — optional (UC05 availability)
+        # Step 4b: Download activities CSV — optional (UC05 availability)
         try:
-            activities_bytes = await downloader.download_activities()
-            logger.info(
-                "sync_runner: activities downloaded %d bytes", len(activities_bytes)
-            )
+            activities_bytes = await client.download_activities(facility_id, from_date, to_date)
+            logger.info("sync_runner: activities downloaded %d bytes", len(activities_bytes))
         except SessionExpiredError:
             raise
         except Exception as exc:  # noqa: BLE001
             msg = f"activities download failed: {exc}"
             logger.error("sync_runner: %s", msg, exc_info=True)
             download_errors.append(msg)
-
-        # For historical_backfill, also download active appointments
-        # (they share the same bookings export; no separate endpoint needed —
-        # the bookings CSV already covers the full configured window)
-        # Active appointments are used by the scheduler, not by bootstrap.
 
         if bookings_bytes is None:
             # Without bookings we can't call run_bootstrap meaningfully.
@@ -159,11 +235,10 @@ async def run_sync(
             )
             raise RuntimeError(
                 f"sync_runner: bookings download failed for location_id={location_id}. "
-                "Cannot proceed without bookings. Errors: "
-                + "; ".join(download_errors)
+                "Cannot proceed without bookings. Errors: " + "; ".join(download_errors)
             )
 
-        # ── Step 4: Persist via run_bootstrap ─────────────────────────────────
+        # ── Step 5: Persist via run_bootstrap ─────────────────────────────────
         logger.info("sync_runner: calling run_bootstrap")
         bootstrap_result: BootstrapResult = await run_bootstrap(
             location_id=location_id,
@@ -177,10 +252,10 @@ async def run_sync(
         if download_errors:
             bootstrap_result["errors"] = list(bootstrap_result["errors"]) + download_errors
 
-        # ── Step 5: Mark session ok ────────────────────────────────────────────
+        # ── Step 6: Mark session ok ────────────────────────────────────────────
         await scraper._mark_ok()
 
-    # ── Step 6: Post-process for historical_backfill ───────────────────────────
+    # ── Step 7: Post-process for historical_backfill ───────────────────────────
     if run_type == "historical_backfill":
         await db.execute(
             update(Location)
@@ -232,6 +307,4 @@ def _write_error_sync_log(
         duration_seconds=round(duration, 3),
     )
     db.add(sync_log)
-    logger.debug(
-        "sync_runner: error sync_log written for location_id=%s", location_id
-    )
+    logger.debug("sync_runner: error sync_log written for location_id=%s", location_id)

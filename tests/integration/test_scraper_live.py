@@ -104,9 +104,7 @@ async def test_live_sync_seeds_data(db: AsyncSession) -> None:
     try:
         cookies = json.loads(cookie_json_raw)
     except json.JSONDecodeError as exc:
-        pytest.fail(
-            f"EVERSPORTS_TEST_COOKIE_JSON is not valid JSON: {exc}"
-        )
+        pytest.fail(f"EVERSPORTS_TEST_COOKIE_JSON is not valid JSON: {exc}")
 
     # Insert a test location
     test_location_id = uuid.uuid4()
@@ -151,19 +149,19 @@ async def test_live_sync_seeds_data(db: AsyncSession) -> None:
 
         # Verify rows in DB
         contacts_count = (
-            await db.execute(
-                select(Contact).where(Contact.location_id == test_location_id)
-            )
-        ).scalars().all()
+            (await db.execute(select(Contact).where(Contact.location_id == test_location_id)))
+            .scalars()
+            .all()
+        )
         assert len(contacts_count) >= 1, "No contacts in DB after sync"
 
         # Bookings may be empty if studio has no recent bookings in the export window
         # (that's an acceptable live state — we just log the count from the result)
         _ = (
-            await db.execute(
-                select(Booking).where(Booking.location_id == test_location_id)
-            )
-        ).scalars().all()
+            (await db.execute(select(Booking).where(Booking.location_id == test_location_id)))
+            .scalars()
+            .all()
+        )
         print(
             f"\nLive sync result: contacts={result['contacts_seeded']}, "
             f"bookings={result['bookings_seeded']}, "
@@ -184,16 +182,8 @@ async def test_live_sync_seeds_data(db: AsyncSession) -> None:
 
         from app.db.models.sessions import Session  # noqa: PLC0415
 
-        await db.execute(
-            delete(Booking).where(Booking.location_id == test_location_id)
-        )
-        await db.execute(
-            delete(Contact).where(Contact.location_id == test_location_id)
-        )
-        await db.execute(
-            delete(Session).where(Session.location_id == test_location_id)
-        )
-        await db.execute(
-            delete(Location).where(Location.id == test_location_id)
-        )
+        await db.execute(delete(Booking).where(Booking.location_id == test_location_id))
+        await db.execute(delete(Contact).where(Contact.location_id == test_location_id))
+        await db.execute(delete(Session).where(Session.location_id == test_location_id))
+        await db.execute(delete(Location).where(Location.id == test_location_id))
         await db.commit()

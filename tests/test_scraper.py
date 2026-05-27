@@ -106,17 +106,23 @@ async def test_session_expired_raises(db: AsyncSession) -> None:
     assert scraper._browser is None
 
 
-# ── 2. test_unset_cookies_raises ──────────────────────────────────────────────
+# ── 2. test_unset_cookies_raises_not_configured ───────────────────────────────
 
 
 @pytest.mark.asyncio
-async def test_unset_cookies_raises(db: AsyncSession) -> None:
+async def test_unset_cookies_raises_not_configured(db: AsyncSession) -> None:
     """
-    EversportsBaseScraper.__aenter__ raises SessionExpiredError when
-    eversports_cookie_cache is None (cookies never imported).
+    EversportsBaseScraper.__aenter__ raises SessionNotConfiguredError (NOT
+    SessionExpiredError) when eversports_cookie_cache is None.
+
+    'No cookies' = location never onboarded.  The error class is distinct from
+    SessionExpiredError so callers can distinguish "not yet set up" from "was
+    working but session timed out".  sync_runner.run_sync handles this case
+    *before* entering the context manager (returns a skip dict); this test
+    exercises the base-class defensive guard for direct callers.
     """
     from app.scrapers.base import EversportsBaseScraper
-    from app.scrapers.exceptions import SessionExpiredError
+    from app.scrapers.exceptions import SessionExpiredError, SessionNotConfiguredError
 
     location = _make_location(
         eversports_cookie_state="ok",  # state says ok but cache is empty
@@ -125,21 +131,35 @@ async def test_unset_cookies_raises(db: AsyncSession) -> None:
 
     scraper = EversportsBaseScraper(location, db)
 
-    with pytest.raises(SessionExpiredError):
+    with pytest.raises(SessionNotConfiguredError):
         await scraper.__aenter__()
 
+    # Must NOT be mis-classified as an expired session
+    with pytest.raises(SessionNotConfiguredError):
+        async with EversportsBaseScraper(location, db):
+            pass  # pragma: no cover
 
-# ── 3. test_unset_state_raises ────────────────────────────────────────────────
+    # Confirm it is NOT a SessionExpiredError (subclass check)
+    try:
+        async with EversportsBaseScraper(location, db):
+            pass  # pragma: no cover
+    except SessionNotConfiguredError as exc:
+        assert not isinstance(exc, SessionExpiredError), (
+            "SessionNotConfiguredError must not be a subclass of SessionExpiredError"
+        )
+
+
+# ── 3. test_unset_state_raises_not_configured ─────────────────────────────────
 
 
 @pytest.mark.asyncio
-async def test_unset_state_raises(db: AsyncSession) -> None:
+async def test_unset_state_raises_not_configured(db: AsyncSession) -> None:
     """
-    EversportsBaseScraper.__aenter__ raises SessionExpiredError when
+    EversportsBaseScraper.__aenter__ raises SessionNotConfiguredError when
     eversports_cookie_state == 'unset' (initial state, cookies never imported).
     """
     from app.scrapers.base import EversportsBaseScraper
-    from app.scrapers.exceptions import SessionExpiredError
+    from app.scrapers.exceptions import SessionNotConfiguredError
 
     location = _make_location(
         eversports_cookie_state="unset",
@@ -148,7 +168,7 @@ async def test_unset_state_raises(db: AsyncSession) -> None:
 
     scraper = EversportsBaseScraper(location, db)
 
-    with pytest.raises(SessionExpiredError):
+    with pytest.raises(SessionNotConfiguredError):
         await scraper.__aenter__()
 
 
@@ -184,7 +204,9 @@ async def test_login_redirect_sets_expired_state(db: AsyncSession) -> None:
 
     # Build a fake Playwright Response object
     fake_response = MagicMock()
-    fake_response.url = "https://app.eversportsmanager.com/login?returnUrl=%2Fadmin%2FTestStudio%2Fbookings"
+    fake_response.url = (
+        "https://app.eversportsmanager.com/login?returnUrl=%2Fadmin%2FTestStudio%2Fbookings"
+    )
 
     with pytest.raises(SessionExpiredError) as exc_info:
         await scraper._check_redirect(fake_response)
@@ -251,9 +273,7 @@ async def _insert_location(db: AsyncSession, **overrides: Any) -> Location:
 
 
 @pytest.mark.asyncio
-async def test_sync_endpoint_returns_503_on_expired(
-    db: AsyncSession, app_with_db: Any
-) -> None:
+async def test_sync_endpoint_returns_503_on_expired(db: AsyncSession, app_with_db: Any) -> None:
     """
     POST /api/v1/admin/locations/{id}/sync returns 503 when
     eversports_cookie_state == 'expired'.
@@ -261,9 +281,7 @@ async def test_sync_endpoint_returns_503_on_expired(
     location = await _insert_location(
         db,
         eversports_cookie_state="expired",
-        eversports_cookie_cache=[
-            {"name": "sid", "value": "x", "domain": "test.com", "path": "/"}
-        ],
+        eversports_cookie_cache=[{"name": "sid", "value": "x", "domain": "test.com", "path": "/"}],
     )
 
     async with AsyncClient(
@@ -279,9 +297,7 @@ async def test_sync_endpoint_returns_503_on_expired(
 
 
 @pytest.mark.asyncio
-async def test_sync_endpoint_returns_400_on_unset(
-    db: AsyncSession, app_with_db: Any
-) -> None:
+async def test_sync_endpoint_returns_400_on_unset(db: AsyncSession, app_with_db: Any) -> None:
     """
     POST /api/v1/admin/locations/{id}/sync returns 400 when
     eversports_cookie_state == 'unset' (cookies not yet imported).
@@ -437,3 +453,109 @@ async def test_sync_endpoint_propagates_session_expired_as_503(
             )
 
     assert resp.status_code == 503, resp.text
+
+
+# ── Scheduled-sweep: mix of states ───────────────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_run_sync_skips_unset_location(db: AsyncSession) -> None:
+    """
+    run_sync returns {"skipped": True, "skip_reason": "not_onboarded"} for a
+    location in the 'unset' state (never onboarded).
+
+    This is the expected behaviour for a scheduled sweep that encounters a
+    location created but not yet configured — it should proceed silently to the
+    next location rather than raising an exception or logging a noisy error.
+    """
+    from app.scrapers.sync_runner import run_sync
+
+    location = await _insert_location(
+        db,
+        eversports_cookie_state="unset",
+        eversports_cookie_cache=None,
+    )
+
+    result = await run_sync(location_id=location.id, db=db, run_type="incremental")
+
+    assert result["skipped"] is True
+    assert result["skip_reason"] == "not_onboarded"
+    assert result["contacts_seeded"] == 0
+    assert result["bookings_seeded"] == 0
+    assert result["errors"] == []
+
+
+@pytest.mark.asyncio
+async def test_run_sync_raises_session_expired_for_expired_state(
+    db: AsyncSession,
+) -> None:
+    """
+    run_sync raises SessionExpiredError for a location in the 'expired' state.
+
+    Unlike 'unset', 'expired' means the location was working but the session
+    has since timed out.  The scheduled sweep must surface this so operators
+    are alerted to refresh the session — it must NOT be silently skipped.
+    """
+    from app.scrapers.exceptions import SessionExpiredError
+    from app.scrapers.sync_runner import run_sync
+
+    location = await _insert_location(
+        db,
+        eversports_cookie_state="expired",
+        eversports_cookie_cache=[
+            {"name": "sid", "value": "old", "domain": "app.eversportsmanager.com", "path": "/"}
+        ],
+    )
+
+    with pytest.raises(SessionExpiredError):
+        await run_sync(location_id=location.id, db=db, run_type="incremental")
+
+
+@pytest.mark.parametrize(
+    "cookie_state,cookie_cache,expected_skipped,expected_raises",
+    [
+        # Not onboarded — cache absent
+        ("unset", None, True, None),
+        # Not onboarded — state says ok but cache is missing (defensive)
+        ("ok", None, True, None),
+        # Expired session — must raise, not skip
+        (
+            "expired",
+            [{"name": "sid", "value": "x", "domain": "app.eversportsmanager.com", "path": "/"}],
+            False,
+            "SessionExpiredError",
+        ),
+    ],
+)
+@pytest.mark.asyncio
+async def test_scheduled_sweep_state_matrix(
+    db: AsyncSession,
+    cookie_state: str,
+    cookie_cache: list | None,
+    expected_skipped: bool,
+    expected_raises: str | None,
+) -> None:
+    """
+    Parameterised sweep: verifies that run_sync emits the right signal for each
+    location state that a scheduled job would encounter across all locations.
+
+      unset / no-cache → returns {"skipped": True}   (not-yet-onboarded)
+      expired          → raises SessionExpiredError   (needs operator action)
+
+    The 'ok' happy path is covered by test_sync_endpoint_success_with_mocked_run_sync.
+    """
+    from app.scrapers.exceptions import SessionExpiredError
+    from app.scrapers.sync_runner import run_sync
+
+    location = await _insert_location(
+        db,
+        eversports_cookie_state=cookie_state,
+        eversports_cookie_cache=cookie_cache,
+    )
+
+    if expected_raises == "SessionExpiredError":
+        with pytest.raises(SessionExpiredError):
+            await run_sync(location_id=location.id, db=db)
+    else:
+        result = await run_sync(location_id=location.id, db=db)
+        assert result.get("skipped") is expected_skipped

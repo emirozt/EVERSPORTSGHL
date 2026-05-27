@@ -119,16 +119,14 @@ async def trigger_sync(
     # Validate run_type
     if body.run_type not in ("incremental", "historical_backfill"):
         raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
             detail=(
                 f"Invalid run_type={body.run_type!r}. "
                 "Must be 'incremental' or 'historical_backfill'."
             ),
         )
 
-    logger.info(
-        "sync: POST location_id=%s run_type=%s", location_id, body.run_type
-    )
+    logger.info("sync: POST location_id=%s run_type=%s", location_id, body.run_type)
 
     try:
         result = await run_sync(
@@ -146,7 +144,7 @@ async def trigger_sync(
     except ValueError as exc:
         await db.rollback()
         raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
             detail=str(exc),
         ) from exc
     except Exception as exc:

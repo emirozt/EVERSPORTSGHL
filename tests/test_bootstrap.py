@@ -213,7 +213,7 @@ async def test_bootstrap_products_classified(db: AsyncSession, test_location: Lo
 async def test_bootstrap_historical_sync_flag_updated(
     db: AsyncSession, test_location: Location
 ) -> None:
-    """After bootstrap, historical_sync_flag is set to 'bootstrapped'."""
+    """After bootstrap, historical_sync_flag is set to 'complete' (unified value for both paths)."""
     run_bootstrap = _get_bootstrap()
     await run_bootstrap(
         location_id=test_location.id,
@@ -226,7 +226,7 @@ async def test_bootstrap_historical_sync_flag_updated(
 
     result = await db.execute(select(Location).where(Location.id == test_location.id))
     loc = result.scalar_one()
-    assert loc.historical_sync_flag == "bootstrapped"
+    assert loc.historical_sync_flag == "complete"
 
 
 @pytest.mark.asyncio

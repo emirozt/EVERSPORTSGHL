@@ -119,15 +119,15 @@ eversports-ghl-connector/
 │   │   ├── __init__.py
 │   │   ├── session.py                ← Async SQLAlchemy session
 │   │   └── models/                   ← SQLAlchemy models
-│   │       ├── location.py
-│   │       ├── contact.py
-│   │       ├── product.py
-│   │       ├── booking.py
-│   │       ├── session_model.py      ← Eversports activity sessions (from admin activities scrape)
-│   │       ├── writeback_job.py
-│   │       ├── ai_usage.py
-│   │       ├── consent_audit.py
-│   │       └── sync_log.py
+│   │       ├── base.py               ← declarative Base
+│   │       ├── location.py           ← M1 — multi-tenant anchor
+│   │       ├── contacts.py           ← M1.5 — one row per customer per location
+│   │       ├── bookings.py           ← M1.5 — booking history
+│   │       ├── sessions.py           ← M1.5 — activity schedule (from activities CSV)
+│   │       ├── sync_log.py           ← M1.5 — one row per sync run
+│   │       ├── writeback_job.py      ← M5 (deferred)
+│   │       ├── ai_usage.py           ← M6 (deferred)
+│   │       └── consent_audit.py      ← M7 (deferred)
 │   ├── ingest/
 │   │   ├── __init__.py
 │   │   ├── csv_parser.py             ← locale-aware CSV parsing (BOM, delimiter, date formats)
@@ -275,61 +275,60 @@ CREATE TABLE locations (
 );
 
 -- contacts: one row per Eversports customer per location
+-- NOTE: This is the M1.5 baseline schema (app/db/models/contacts.py +
+-- alembic/versions/a1b2c3d4e5f6). Fields deferred to M3+ are noted inline.
 CREATE TABLE contacts (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-  location_id UUID NOT NULL REFERENCES locations(id),
-  eversports_customer_id TEXT,                    -- nullable until first writeback creates them
-  ghl_contact_id TEXT,                            -- nullable until first sync
+  location_id UUID NOT NULL,
+
+  -- Identity
   email TEXT,
-  phone TEXT,
+  email_lower TEXT,                               -- normalised for upsert key
   first_name TEXT,
   last_name TEXT,
+  phone TEXT,                                     -- E.164 normalised
+  phone_raw TEXT,                                 -- original value before normalisation
 
-  -- current state (denormalised for delta diff)
+  -- Eversports-sourced
+  eversports_customer_id TEXT,
+  eversports_clubgroup TEXT,
+  eversports_newsletter_optin BOOLEAN,            -- Eversports' own opt-in; NOT our consent
+  eversports_location_address TEXT,
+
+  -- Package / product
+  products_purchased JSONB NOT NULL DEFAULT '[]',
   active_package_type TEXT,
   active_package_name TEXT,
-  active_package_sessions_total INT,
-  active_package_sessions_used INT,
-  active_package_sessions_remaining INT,
   active_package_expiry_date DATE,
-  last_session_date DATE,
-  last_session_end_time TIMESTAMPTZ,
-  last_class_name TEXT,
+  active_package_sessions_remaining INT,
+
+  -- Attendance / engagement (derived at bootstrap/sync time)
   total_sessions_attended INT NOT NULL DEFAULT 0,
   no_show_count INT NOT NULL DEFAULT 0,
-  upcoming_sessions_count INT NOT NULL DEFAULT 0,
-  upcoming_session_name TEXT,
-  upcoming_session_date DATE,
-  upcoming_session_start_time TIMESTAMPTZ,
-  upcoming_session_end_time TIMESTAMPTZ,
+  last_session_date DATE,
+  last_session_end_time TIME,
+  last_class_name TEXT,
+  last_booking_date DATE,
+  last_no_show_email_sent_at TIMESTAMPTZ,
   sessions_attended_this_month INT NOT NULL DEFAULT 0,
   sessions_attended_last_month INT NOT NULL DEFAULT 0,
-  sessions_per_week_last_month NUMERIC NOT NULL DEFAULT 0,
-  last_booking_date DATE,
-  converted_package_name TEXT,
-  conversion_date DATE,
-  conversion_source TEXT,
-  chatbot_outbound_attempts INT NOT NULL DEFAULT 0,
-  last_chatbot_interaction TIMESTAMPTZ,
+  sessions_per_week_last_month NUMERIC,
 
-  -- full JSON kept here, summaries pushed to GHL
-  products_purchased JSONB NOT NULL DEFAULT '[]',
-  booking_history JSONB NOT NULL DEFAULT '[]',
+  -- GHL sync (populated after first GHL sync — M3)
+  ghl_contact_id TEXT,
 
-  -- previous values for delta (mirror of every syncable field)
-  prev_state JSONB NOT NULL DEFAULT '{}',
-
-  -- sync metadata
-  last_sync_timestamp TIMESTAMPTZ,
-  ghl_sync_status TEXT NOT NULL DEFAULT 'pending',
-  ghl_last_updated TIMESTAMPTZ,
+  -- Bootstrap tracking
+  bootstrap_run_id UUID,
 
   created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
   updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
 
-  UNIQUE (location_id, eversports_customer_id),
-  UNIQUE (location_id, email)
+  UNIQUE (location_id, email_lower)               -- upsert key per spec
 );
+-- Deferred to M3+: prev_state JSONB, ghl_sync_status, last_sync_timestamp, ghl_last_updated,
+--   converted_package_name, conversion_date, conversion_source, chatbot_outbound_attempts,
+--   last_chatbot_interaction, booking_history, upcoming_sessions_count,
+--   active_package_sessions_total, active_package_sessions_used, upcoming_session_*
 
 CREATE INDEX idx_contacts_location ON contacts(location_id);
 CREATE INDEX idx_contacts_email ON contacts(email);
@@ -351,42 +350,60 @@ CREATE TABLE products (
 );
 
 -- bookings: last 90 days
+-- NOTE: This is the M1.5 baseline schema (app/db/models/bookings.py +
+-- alembic/versions/a1b2c3d4e5f6).
 CREATE TABLE bookings (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-  location_id UUID NOT NULL REFERENCES locations(id),
-  contact_id UUID REFERENCES contacts(id),
-  eversports_booking_id TEXT NOT NULL,
-  eversports_customer_id TEXT,
-  session_datetime TIMESTAMPTZ NOT NULL,
-  session_end_datetime TIMESTAMPTZ,
+  location_id UUID NOT NULL,
+  contact_id UUID NOT NULL,
+  eversports_booking_id TEXT NOT NULL,            -- sha256 synthetic when CSV has no explicit ID
   activity_name TEXT,
-  package_type TEXT,
-  attendance_status TEXT,                         -- attended | no_show | late_cancel | upcoming
-  cancellation_timestamp TIMESTAMPTZ,
-  fetched_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  session_datetime TIMESTAMPTZ,
+  session_end_datetime TIMESTAMPTZ,
+  trainer TEXT,
+  package_used TEXT,                              -- product name used for this booking
+  price NUMERIC,
+  attendance_status TEXT NOT NULL DEFAULT 'unknown',  -- attended | no_show | late_cancel | unknown
+  bootstrap_run_id UUID,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
   UNIQUE (location_id, eversports_booking_id)
 );
+-- Deferred: cancellation_timestamp, eversports_customer_id, fetched_at
 
 CREATE INDEX idx_bookings_contact ON bookings(contact_id);
 CREATE INDEX idx_bookings_session_dt ON bookings(session_datetime);
 
 -- sessions: activity schedule from the admin activities scrape (NOT Provider API)
+-- NOTE: This is the M1.5 baseline schema (app/db/models/sessions.py +
+-- alembic/versions/a1b2c3d4e5f6). Unique key is the natural composite, not a
+-- scraper-assigned ID (Eversports CSVs do not expose a session ID column).
 CREATE TABLE sessions (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-  location_id UUID NOT NULL REFERENCES locations(id),
-  eversports_session_id TEXT NOT NULL,
-  activity_name TEXT NOT NULL,
-  activity_type TEXT,
-  start_time TIMESTAMPTZ NOT NULL,
-  end_time TIMESTAMPTZ NOT NULL,
+  location_id UUID NOT NULL,
+  session_type TEXT,
+  start_time TIMESTAMPTZ,
+  end_time TIMESTAMPTZ,
+  activity_name TEXT,
+  activity_group TEXT,
+  sport TEXT,
+  trainer TEXT,
+  location_label TEXT,
   total_spots INT,
-  available_spots INT,
-  checkout_link TEXT,
-  fetched_at TIMESTAMPTZ NOT NULL DEFAULT now(),
-  UNIQUE (location_id, eversports_session_id)
+  registered_count INT,
+  attended_count INT,
+  waitlist_count INT,
+  available_spots INT,                            -- derived: max(0, total_spots - registered_count)
+  status TEXT,
+  comment TEXT,
+  published BOOLEAN,
+  bootstrap_run_id UUID,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  UNIQUE (location_id, start_time, activity_name, trainer)  -- natural key
 );
+-- Deferred: eversports_session_id, checkout_link, fetched_at
 
-CREATE INDEX idx_sessions_lookup ON sessions(location_id, activity_type, start_time);
+CREATE INDEX idx_sessions_lookup ON sessions(location_id, start_time);
 
 -- writeback_jobs: queue + audit
 CREATE TABLE writeback_jobs (
@@ -464,25 +481,27 @@ CREATE INDEX idx_consent_audit_contact ON consent_audit(contact_id);
 -- prevent UPDATE/DELETE in normal flow — enforced at application layer
 
 -- sync_log: one row per sync run
+-- NOTE: This is the M1.5 baseline schema (app/db/models/sync_log.py +
+-- alembic/versions/a1b2c3d4e5f6). Richer counters deferred to M3+ when GHL
+-- sync is wired up (contacts_updated_ghl, contacts_created_ghl, tags_removed,
+-- writeback_jobs_processed, writeback_jobs_failed).
 CREATE TABLE sync_log (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-  location_id UUID NOT NULL REFERENCES locations(id),
-  run_timestamp TIMESTAMPTZ NOT NULL DEFAULT now(),
-  run_type TEXT NOT NULL,                         -- event-driven | hourly-catchup | overnight | historical
+  location_id UUID NOT NULL,
+  run_type TEXT NOT NULL,                         -- 'bootstrap' | 'incremental' | 'historical_backfill' | 'scrape_error'
   contacts_processed INT NOT NULL DEFAULT 0,
-  contacts_updated_ghl INT NOT NULL DEFAULT 0,
-  contacts_created_ghl INT NOT NULL DEFAULT 0,
+  contacts_updated INT NOT NULL DEFAULT 0,
   tags_applied INT NOT NULL DEFAULT 0,
-  tags_removed INT NOT NULL DEFAULT 0,
   pipeline_moves INT NOT NULL DEFAULT 0,
-  writeback_jobs_processed INT NOT NULL DEFAULT 0,
-  writeback_jobs_failed INT NOT NULL DEFAULT 0,
-  errors INT NOT NULL DEFAULT 0,
-  error_details JSONB,
-  run_duration_seconds INT
+  errors JSONB NOT NULL DEFAULT '[]',             -- list of error message strings
+  bootstrap_run_id UUID,
+  duration_seconds NUMERIC,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
+-- Deferred to M3+: contacts_updated_ghl, contacts_created_ghl, tags_removed,
+--   writeback_jobs_processed, writeback_jobs_failed, run_timestamp (use created_at)
 
-CREATE INDEX idx_sync_log_recent ON sync_log(location_id, run_timestamp DESC);
+CREATE INDEX idx_sync_log_recent ON sync_log(location_id, created_at DESC);
 ```
 
 ---

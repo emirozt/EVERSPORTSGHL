@@ -651,9 +651,7 @@ async def run_bootstrap(
 
     # ── Step 8: Update historical_sync_flag ────────────────────────────────
     await db.execute(
-        update(Location)
-        .where(Location.id == location_id)
-        .values(historical_sync_flag="bootstrapped")
+        update(Location).where(Location.id == location_id).values(historical_sync_flag="complete")
     )
 
     logger.info(

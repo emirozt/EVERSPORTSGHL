@@ -254,6 +254,51 @@ Post-M1 audit comparing `app/db/models/location.py` and `alembic/versions/d3f8b2
 
 **No code changes required.** Model and migration are internally consistent and fully implement the `07_foundation_layer.md` config table.
 
+### v8 — 2026-05-27 — M2 + M1.5 spec consistency pass (post-implementation audit)
+
+Audit comparing implemented code against spec docs after M2 scraper skeleton and M1.5 CSV bootstrap were built.
+
+**Spec updated to match code (code was correct; specs were stale):**
+
+- `07_foundation_layer.md` § Helper Functions — `is_trial`, `is_membership`, `is_voucher`, `is_merch`, and `is_card` keyword lists were stale (reflected pre-M1.5 versions). Updated to match `app/ingest/classifier.py` exactly: expanded `is_trial` keywords (`schnupper`, `intro`, `einführung`, `einfuhrung`, `starter`), expanded `is_membership` keywords (` abo`, `abo-`, `abonnement`, `flatrate`, `flat rate`), expanded `is_voucher` (`geschenk`), expanded `is_merch` (`mat`, `matte`, `handtuch`, `merchandise`). `is_card` updated to reflect the explicit-positive implementation (was: old residual-only version duplicated alongside the newer explicit-positive section — now the Helper Functions section matches the implementation).
+
+- `07_foundation_layer.md` § `historical_sync_flag` config entry — documented values were only `complete` / `pending`. Code sets `"bootstrapped"` when the CSV bootstrap path completes and `"complete"` when the scraper `historical_backfill` run type completes. Both values added to the config table. Bootstrap execution sequence step 8 updated to show `"bootstrapped"`. Pseudocode for the historical sync decision updated to check `in ("complete", "bootstrapped")`.
+
+- `DEV_SPEC.md § 5` `contacts` DDL — was a speculative future-state schema with ~15 columns not yet implemented (prev_state, ghl_sync_status, booking_history, converted_package_name, conversion_source, upcoming_sessions_count, etc.). Replaced with the M1.5 baseline matching `app/db/models/contacts.py` + migration `a1b2c3d4e5f6`. Deferred columns annotated.
+
+- `DEV_SPEC.md § 5` `bookings` DDL — included `eversports_customer_id`, `package_type`, `cancellation_timestamp`, `fetched_at` (not implemented); was missing `contact_id`, `trainer`, `price`, `package_used`, `bootstrap_run_id` (implemented). Replaced with the M1.5 baseline.
+
+- `DEV_SPEC.md § 5` `sessions` DDL — used `eversports_session_id` as the unique key (Eversports CSV exports do not provide a session ID column). Actual unique key is the natural composite `(location_id, start_time, activity_name, trainer)`. DDL replaced with M1.5 baseline including all columns present in the model.
+
+- `DEV_SPEC.md § 5` `sync_log` DDL — had `contacts_updated_ghl`, `contacts_created_ghl`, `tags_removed`, `writeback_jobs_processed`, `writeback_jobs_failed` (not implemented in M1.5); actual model has `contacts_updated`, `errors JSONB`, `duration_seconds`, `bootstrap_run_id`. DDL replaced with M1.5 baseline.
+
+**No code changes required** for the spec-consistency items above. All code (models, migrations, parsers, bootstrap, sync_runner, scraper base, sync API) is internally consistent. The spec was stale.
+
+### v8b — 2026-05-27 — M2 QA fix pass (post-review corrections)
+
+Code changes made after the QA review verdict:
+
+**`unset` cookie state — changed from raise to skip:**
+- `app/scrapers/exceptions.py`: added `SessionNotConfiguredError` as a distinct exception class for "location never onboarded" (not a session error).
+- `app/scrapers/base.py`: `__aenter__` now raises `SessionNotConfiguredError` for `unset`/empty-cache (previously `SessionExpiredError`).
+- `app/scrapers/sync_runner.py`: `run_sync` now returns `{"skipped": True, "skip_reason": "not_onboarded"}` for `unset` or missing cookie cache, rather than raising. `expired` still raises `SessionExpiredError`. Rationale: `unset` is an onboarding state, not an error; the scheduled sweep must not abort the entire batch for one un-configured location.
+- `tests/test_scraper.py`: updated `test_unset_cookies_raises` and `test_unset_state_raises` to expect `SessionNotConfiguredError`. Added `test_run_sync_skips_unset_location`, `test_run_sync_raises_session_expired_for_expired_state`, and `test_scheduled_sweep_state_matrix` (parameterised: unset/no-cache → skip, expired → raise).
+- `07_foundation_layer.md` § Cookie state table: updated `unset` behaviour description to match code.
+
+**`historical_sync_flag` — unified to `"complete"`:**
+- `app/ingest/bootstrap.py`: changed `historical_sync_flag = "bootstrapped"` → `"complete"`. Both the CSV bootstrap path and the scraper `historical_backfill` path now set the same value. Downstream scheduler checks `flag == "complete"` (no need for `in ("complete", "bootstrapped")`).
+- `tests/test_bootstrap.py`: updated `test_bootstrap_historical_sync_flag_updated` assertion.
+
+**FastAPI deprecation:** `app/api/v1/admin/sync.py`: `HTTP_422_UNPROCESSABLE_ENTITY` → `HTTP_422_UNPROCESSABLE_CONTENT` (both occurrences).
+
+**ruff format:** 6 M2 files reformatted (specialist had not run `ruff format` before committing).
+
+**DEV_SPEC.md § 4 repo layout:** updated `app/db/models/` filenames to actual plural forms (`contacts.py`, `bookings.py`, `sessions.py`); annotated deferred M5/M6/M7 files.
+
+**07_foundation_layer.md § Sync Log:** updated `run_type` column documentation to list implemented values (`bootstrap`, `incremental`, `historical_backfill`, `scrape_error`) and annotate planned M4+ values. Updated counter columns to match M1.5 baseline.
+
+**Test count after all fixes:** 86 passed, 0 warnings, 1 skipped (integration).
+
 ### Still-open items
 
 Each updated doc lists location-specific open items in its "Open Questions / To Confirm" section. The highest-impact open items rolled up:
