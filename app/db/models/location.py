@@ -2,8 +2,7 @@ import uuid
 from datetime import datetime
 from decimal import Decimal
 
-from sqlalchemy import Boolean, Integer, Numeric, Text, func, text
-from sqlalchemy.dialects.postgresql import JSONB, TIMESTAMP, UUID
+from sqlalchemy import JSON, Boolean, DateTime, Integer, Numeric, Text, Uuid, func, text
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.db.models.base import Base
@@ -12,9 +11,14 @@ _STOP_KEYWORDS_DEFAULT = text(
     r"'^(stop|stopp|aufhören|aufhoeren|abmelden|keine werbung|unsubscribe|opt out|opt-out)$'"
 )
 
-_GATEKEEPER_NOISE_DEFAULT = text(
+_GATEKEEPER_NOISE_DEFAULT_PG = text(
     """'{"acknowledgment":"silent_ignore","emoji_reaction":"react_emoji","""
     """"social_compliment":"react_emoji","off_topic":"silent_ignore","spam":"silent_ignore"}'::jsonb"""
+)
+# SQLite-safe version used by the ORM model — the migration file retains the ::jsonb cast
+_GATEKEEPER_NOISE_DEFAULT = text(
+    """'{"acknowledgment":"silent_ignore","emoji_reaction":"react_emoji","""
+    """"social_compliment":"react_emoji","off_topic":"silent_ignore","spam":"silent_ignore"}'"""
 )
 
 
@@ -22,7 +26,7 @@ class Location(Base):
     __tablename__ = "locations"
 
     id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True),
+        Uuid(as_uuid=True),
         primary_key=True,
         server_default=func.gen_random_uuid(),
     )
@@ -57,7 +61,7 @@ class Location(Base):
         Numeric, nullable=False, server_default=text("0.7")
     )
     gatekeeper_noise_action: Mapped[dict] = mapped_column(  # type: ignore[type-arg]
-        JSONB, nullable=False, server_default=_GATEKEEPER_NOISE_DEFAULT
+        JSON, nullable=False, server_default=_GATEKEEPER_NOISE_DEFAULT
     )
     gatekeeper_owner_alert_categories: Mapped[str] = mapped_column(
         Text,
@@ -65,10 +69,10 @@ class Location(Base):
         server_default=text("'complaint,injury_medical,billing_dispute,low_confidence'"),
     )
     product_keyword_map: Mapped[dict] = mapped_column(  # type: ignore[type-arg]
-        JSONB, nullable=False, server_default=text("'{}'::jsonb")
+        JSON, nullable=False, server_default=text("'{}'")
     )
     whatsapp_templates: Mapped[dict] = mapped_column(  # type: ignore[type-arg]
-        JSONB, nullable=False, server_default=text("'{}'::jsonb")
+        JSON, nullable=False, server_default=text("'{}'")
     )
     consent_default_locale: Mapped[str] = mapped_column(
         Text, nullable=False, server_default=text("'de-AT'")
@@ -89,10 +93,10 @@ class Location(Base):
     )
 
     created_at: Mapped[datetime] = mapped_column(
-        TIMESTAMP(timezone=True), nullable=False, server_default=func.now()
+        DateTime(timezone=True), nullable=False, server_default=func.now()
     )
     updated_at: Mapped[datetime] = mapped_column(
-        TIMESTAMP(timezone=True),
+        DateTime(timezone=True),
         nullable=False,
         server_default=func.now(),
         onupdate=func.now(),
