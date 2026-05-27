@@ -262,3 +262,21 @@ Each updated doc lists location-specific open items in its "Open Questions / To 
 - Eversports admin ToS — verify browser automation is contractually permitted; pursue B2B data agreement in parallel as risk mitigation
 - DPA template — engage legal counsel for DACH-grade DPA
 - No-show vs late-cancel distinction — confirm Eversports' export exposes cancellation timestamps reliably; otherwise foundation needs a manual classification UI per location
+
+### v7 — 2026-05-27 — M2 auth model redesign: cookie-export replaces automated login
+
+**Trigger:** Pre-M2 dependency review revealed that Eversports admin login uses TOTP 2FA via an authenticator app. Automated email/password login cannot complete the 2FA step, and storing/deriving the TOTP seed is explicitly prohibited.
+
+**Decision:** M2 uses the cookie-export pattern from the reference PoC (`reference/eversports_scraping_poc/`). The operator logs in manually, exports session cookies via Cookie-Editor, and hands the JSON to `scripts/import_cookies.py`, which writes it into `locations.eversports_cookie_cache`. The scraper injects those cookies into Playwright's browser context on every run. On session expiry (login redirect detected), the scraper sets `eversports_cookie_state = 'expired'` and alerts the operator rather than crashing.
+
+**Affected spec sections:**
+- `07_foundation_layer.md` § Authentication — fully rewritten; old "stored credentials + secrets manager login" text replaced with cookie-export model, state machine, and reference to PoC
+- `07_foundation_layer.md` config table — added `eversports_cookie_cache` (JSONB nullable) and `eversports_cookie_state` (TEXT DEFAULT 'unset'); updated description of `eversports_credentials_ref` (now informational only in v1)
+- `DEV_SPEC.md` § M2 — updated bullet points and acceptance criterion: "using exported session cookies (not automated login)"
+- `DEV_SPEC.md` § 5 DDL — added the two new columns
+
+**Secrets provider:** `env` mode for v1 (existing stub in `app/config.py`). `EVERSPORTS_EMAIL` / `EVERSPORTS_PASSWORD` stored in `.env` for documentation; not used by the scraper for login in v1. Doppler migration deferred to multi-environment phase.
+
+**Cookie storage:** `locations.eversports_cookie_cache` JSONB column on the `locations` table (encrypted at rest by Postgres). No Redis, no filesystem, no secrets-manager writeback.
+
+**No impact on M1, M1.5, M3–M8.** The cookie-export model is fully transparent to the delta engine, GHL sync, and all use-case layers.

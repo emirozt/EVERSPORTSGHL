@@ -246,7 +246,9 @@ CREATE TABLE locations (
   eversports_location_id TEXT,
   ghl_subaccount_id TEXT NOT NULL UNIQUE,
   ghl_oauth_token_ref TEXT NOT NULL,
-  eversports_credentials_ref TEXT NOT NULL,
+  eversports_credentials_ref TEXT NOT NULL,         -- secrets-manager ref; informational in v1 (TOTP 2FA blocks automated login)
+  eversports_cookie_cache JSONB,                    -- Cookie-Editor export; injected by scripts/import_cookies.py; NULL = not yet imported
+  eversports_cookie_state TEXT NOT NULL DEFAULT 'unset',  -- 'unset' | 'ok' | 'expired'
   timezone TEXT NOT NULL,
   country TEXT NOT NULL DEFAULT 'DE',                                    -- ISO 3166-1 alpha-2; used as libphonenumber default_region
   late_cancel_window_hours INT NOT NULL DEFAULT 24,
@@ -587,12 +589,14 @@ PYTHONUNBUFFERED=1
 - Step 2: `spec-consistency-checker` — verify the column maps in code match the maps documented in `07_foundation_layer.md` § "Column maps" exactly
 
 ### M2 — Read scraper (2 weeks)
-- Playwright base class with login + cookie persistence
+- Playwright base class with **cookie-export auth** (NOT automated login — Eversports uses TOTP 2FA; see `07_foundation_layer.md` § Authentication for the full model)
+- `scripts/import_cookies.py` — CLI tool to write Cookie-Editor JSON exports into `locations.eversports_cookie_cache`
+- `locations.eversports_cookie_state` — `unset` / `ok` / `expired`; scraper surfaces human-readable alert on expiry
 - Admin CSV downloaders for all report types — including the **activities export** which seeds the `sessions` table and produces `available_spots = max_participants − registered` for UC05
 - Persist raw data into Postgres tables (contacts, products, bookings, sessions)
 - Reuses the same parsers + normalisers from M1.5 (the scraper just provides files instead of HTTP upload)
 - `sync_log` writes
-**Acceptance:** for one test location, scraper runs end-to-end against a real Eversports test account; all reports land in Postgres; sync_log has a row; the `sessions` table is populated for the next 14 days with derived `available_spots`.
+**Acceptance:** for one test location, scraper runs end-to-end against a real Eversports test account **using exported session cookies** (not automated login); all reports land in Postgres; `sync_log` has a row; `sessions` table is populated for the next 14 days with derived `available_spots`; on an intentionally-expired cookie the scraper sets `cookie_state = expired` and logs a clear error rather than crashing.
 
 **Recommended agent invocations:**
 - Primary: `eversports-scraper-specialist` — owns the entire build. Login resilience, cookie persistence, retry/backoff, partial-failure handling.

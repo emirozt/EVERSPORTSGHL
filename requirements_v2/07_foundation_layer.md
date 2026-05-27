@@ -80,7 +80,30 @@ The foundation is the data + action platform that all use cases sit on top of. I
 
 ### Authentication
 
-The scraper uses Playwright to log into Eversports admin with stored credentials. Credentials are kept in a secrets manager (Doppler / AWS Secrets Manager / Vault) per location — never in Postgres or any sheet. Session cookies are persisted in encrypted storage and reused until expiry.
+**Model: cookie-export (not automated login)**
+
+Eversports admin login requires TOTP 2FA via an authenticator app. Automated email/password login is not used — we do not store or derive TOTP seeds. Instead, the connector uses the **cookie-export pattern**:
+
+1. The operator logs into `app.eversportsmanager.com` manually in their browser.
+2. They export the session cookies using Cookie-Editor (or equivalent browser extension) as a JSON array.
+3. They paste the JSON into `scripts/import_cookies.py`, which writes it into `locations.eversports_cookie_cache` (JSONB, encrypted at rest by Postgres).
+4. The scraper reads cookies from `eversports_cookie_cache`, injects them into Playwright's browser context, and makes requests as an authenticated user.
+5. When a request returns a login-redirect (HTTP 302 to `/login` or equivalent), the scraper sets `locations.eversports_cookie_state = 'expired'`, stops the run, writes an error to `sync_log`, and surfaces a human-readable alert: **"Eversports session expired — please re-export cookies and run `import_cookies.py` to resume scraping."**
+6. The operator re-exports cookies and repeats steps 1–3.
+
+**Email and password** (`EVERSPORTS_EMAIL` / `EVERSPORTS_PASSWORD`) are stored in `.env` for reference and for any non-2FA paths (e.g. future automated login if Eversports ever provides a service-account option). They are NOT used by the scraper in v1.
+
+**Cookie state transitions on `locations.eversports_cookie_state`:**
+
+| State | Meaning | Scraper behaviour |
+|---|---|---|
+| `unset` | No cookies imported yet | Skip run; log warning |
+| `ok` | Cookies present; last run succeeded | Normal operation |
+| `expired` | Last run got a login redirect | Stop; alert operator |
+
+**Cookie lifetime:** Eversports admin session cookies are long-lived (observed TTL ~30 days). The operator re-exports approximately once a month. Future work (post-v1) may automate cookie refresh via a browser extension or headless re-login if Eversports provides a service-account path.
+
+**Reference implementation:** `reference/eversports_scraping_poc/` contains a Node.js PoC that used the same cookie-export pattern. The Python/Playwright implementation in M2 follows the same design.
 
 ### Read sources
 
@@ -870,7 +893,9 @@ Per-location overrides in `locations.product_keyword_map` JSON.
 | `eversports_location_id` | Optional sub-location identifier within a multi-site studio. Nullable. | `loc_abc` |
 | `ghl_subaccount_id` | GHL sub-account ID | `abc123` |
 | `ghl_oauth_token_ref` | Secret manager reference | `secret://ghl/abc123` |
-| `eversports_credentials_ref` | Scraper login | `secret://eversports/login/abc123` |
+| `eversports_credentials_ref` | Secrets manager reference for the studio's Eversports admin email + password (informational; not used for automated login in v1 due to TOTP 2FA). | `secret://eversports/login/abc123` |
+| `eversports_cookie_cache` | JSONB array of Playwright-compatible cookie objects, exported via Cookie-Editor and imported via `scripts/import_cookies.py`. Nullable — absence means cookies have not been imported yet. | `[{"name":"eversports-manager.sid","value":"...","domain":"app.eversportsmanager.com",...}]` |
+| `eversports_cookie_state` | Scraper session state. `unset` (no cookies imported), `ok` (last run authenticated successfully), `expired` (last run got a login redirect — operator must re-export). Default `unset`. | `ok` |
 | `timezone` | IANA timezone | `Europe/Vienna` |
 | `country` | ISO 3166-1 alpha-2 country code. Used as `default_region` for phone normalisation (libphonenumber). DACH only: `DE`, `AT`, `CH`. Default `DE`. | `AT` |
 | `historical_sync_flag` | Whether 30-day historical sync has run | `complete` / `pending` |

@@ -35,6 +35,18 @@ class Location(Base):
     ghl_subaccount_id: Mapped[str] = mapped_column(Text, nullable=False, unique=True)
     ghl_oauth_token_ref: Mapped[str] = mapped_column(Text, nullable=False)
     eversports_credentials_ref: Mapped[str] = mapped_column(Text, nullable=False)
+    # ── Cookie-export auth (M2) ────────────────────────────────────────────────
+    # Eversports admin uses TOTP 2FA — automated login is not used.
+    # Operator exports cookies via Cookie-Editor → scripts/import_cookies.py → here.
+    eversports_cookie_cache: Mapped[list | None] = mapped_column(  # type: ignore[type-arg]
+        JSON, nullable=True
+    )
+    eversports_cookie_state: Mapped[str] = mapped_column(
+        Text,
+        nullable=False,
+        server_default=text("'unset'"),
+        default="unset",
+    )
     timezone: Mapped[str] = mapped_column(Text, nullable=False)
     country: Mapped[str] = mapped_column(
         Text, nullable=False, server_default=text("'DE'"), default="DE"
