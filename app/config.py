@@ -48,6 +48,28 @@ class Settings(BaseSettings):
     # Server
     port: int = 8080
 
+    # ── M5 Writeback safety ───────────────────────────────────────────────────
+    # Controls the dev-mode safety guard on writeback handlers.
+    # "dev"  — hard whitelist: only emiroztrk@gmail.com + Reformer Booty Burn slot
+    # "prod" — no whitelist; production Eversports account may be touched
+    # MUST be explicitly set to "prod" in production.  Default-deny.
+    writeback_safety_mode: str = "dev"
+
+    # When True, all writeback handlers log their payload and return a fake
+    # success without contacting Eversports.  Flip to False only after the
+    # user has reviewed dry-run logs and given written go-ahead in chat.
+    writeback_dry_run: bool = True
+
+    # ── M5 Notification (audit email on every live writeback) ─────────────
+    # SMTP credentials for sending writeback audit notifications.
+    # Leave smtp_host unset to use the stub path (log-only).
+    notification_smtp_host: str | None = None
+    notification_smtp_port: int = 587
+    notification_smtp_user: str | None = None
+    notification_smtp_password: str | None = None
+    notification_from_email: str = "noreply@eversports-ghl.local"
+    notification_owner_email: str | None = None  # default notification recipient
+
 
 @lru_cache
 def get_settings() -> Settings:
