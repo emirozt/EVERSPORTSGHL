@@ -926,6 +926,460 @@ class TestExecutorWithRetryIntegration:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# TestSafetyGuardExtra  — gaps in idempotency key coverage + case-insensitivity
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+class TestSafetyGuardExtra:
+    def test_idempotency_key_create_booking(self):
+        """make_create_booking_key is deterministic and input-sensitive."""
+        k1 = SafetyGuard.make_create_booking_key("cust-1", "sess-1")
+        k2 = SafetyGuard.make_create_booking_key("cust-1", "sess-1")
+        k3 = SafetyGuard.make_create_booking_key("cust-1", "sess-2")
+        assert k1 == k2, "same inputs → same key"
+        assert k1 != k3, "different session_id → different key"
+
+    def test_idempotency_key_reschedule_booking(self):
+        """make_reschedule_booking_key is deterministic and input-sensitive."""
+        k1 = SafetyGuard.make_reschedule_booking_key("book-1", "sess-new")
+        k2 = SafetyGuard.make_reschedule_booking_key("book-1", "sess-new")
+        k3 = SafetyGuard.make_reschedule_booking_key("book-1", "sess-other")
+        assert k1 == k2
+        assert k1 != k3
+
+    def test_email_whitelist_is_case_insensitive(self):
+        """Dev-mode guard accepts the whitelisted email in uppercase."""
+        guard = SafetyGuard(mode="dev")
+        guard.check_create_customer(TEST_EMAIL.upper())  # should not raise
+
+    def test_create_customer_key_email_normalised(self):
+        """Keys for the same email in different cases are identical."""
+        k_lower = SafetyGuard.make_create_customer_key("loc", "A@B.COM")
+        k_upper = SafetyGuard.make_create_customer_key("loc", "a@b.com")
+        assert k_lower == k_upper, "email normalised to lowercase before hashing"
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# TestHandlersDryRunExtra  — reschedule/cancel safety guard, invalid datetimes,
+#                            and live-path NotImplementedError coverage
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+class TestHandlersDryRunExtra:
+    @pytest.mark.asyncio
+    async def test_reschedule_booking_safety_guard_fires(self):
+        """reschedule_booking raises SafetyGuardError for non-whitelisted class."""
+        from app.writeback.handlers.reschedule_booking import handle_reschedule_booking
+
+        bad_payload = {**RESCHEDULE_PAYLOAD, "new_class_name": "Pilates Core"}
+        with pytest.raises(SafetyGuardError, match="non-whitelisted class"):
+            await handle_reschedule_booking(
+                bad_payload, "loc-1", dry_run=True, safety_mode="dev"
+            )
+
+    @pytest.mark.asyncio
+    async def test_cancel_booking_safety_guard_fires(self):
+        """cancel_booking raises SafetyGuardError for non-whitelisted class."""
+        from app.writeback.handlers.cancel_booking import handle_cancel_booking
+
+        bad_payload = {**CANCEL_PAYLOAD, "class_name": "Spin Class"}
+        with pytest.raises(SafetyGuardError, match="non-whitelisted class"):
+            await handle_cancel_booking(
+                bad_payload, "loc-1", dry_run=True, safety_mode="dev"
+            )
+
+    @pytest.mark.asyncio
+    async def test_reschedule_booking_invalid_datetime(self):
+        """reschedule_booking raises ValueError for a bad new_session_datetime."""
+        from app.writeback.handlers.reschedule_booking import handle_reschedule_booking
+
+        bad_payload = {**RESCHEDULE_PAYLOAD, "new_session_datetime": "not-a-date"}
+        with pytest.raises(ValueError, match="invalid new_session_datetime"):
+            await handle_reschedule_booking(
+                bad_payload, "loc-1", dry_run=True, safety_mode="dev"
+            )
+
+    @pytest.mark.asyncio
+    async def test_cancel_booking_invalid_datetime(self):
+        """cancel_booking raises ValueError for a bad session_datetime."""
+        from app.writeback.handlers.cancel_booking import handle_cancel_booking
+
+        bad_payload = {**CANCEL_PAYLOAD, "session_datetime": "bad-value"}
+        with pytest.raises(ValueError, match="invalid session_datetime"):
+            await handle_cancel_booking(
+                bad_payload, "loc-1", dry_run=True, safety_mode="dev"
+            )
+
+    @pytest.mark.asyncio
+    async def test_reschedule_booking_live_raises_not_implemented(self):
+        """Live path (dry_run=False) raises NotImplementedError."""
+        from app.writeback.handlers.reschedule_booking import handle_reschedule_booking
+
+        with pytest.raises(NotImplementedError):
+            await handle_reschedule_booking(
+                RESCHEDULE_PAYLOAD, "loc-1", dry_run=False, safety_mode="dev"
+            )
+
+    @pytest.mark.asyncio
+    async def test_cancel_booking_live_raises_not_implemented(self):
+        """Live path (dry_run=False) raises NotImplementedError."""
+        from app.writeback.handlers.cancel_booking import handle_cancel_booking
+
+        with pytest.raises(NotImplementedError):
+            await handle_cancel_booking(
+                CANCEL_PAYLOAD, "loc-1", dry_run=False, safety_mode="dev"
+            )
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# TestRetryPolicyExtra  — completed_at tracking
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+class TestRetryPolicyExtra:
+    @pytest.mark.asyncio
+    async def test_dead_sets_completed_at(
+        self, db: AsyncSession, factory: async_sessionmaker[AsyncSession], location: Location
+    ):
+        """When a job is marked dead, completed_at is populated."""
+        job = _make_job(location.id, "cancel_booking", CANCEL_PAYLOAD, attempt_count=2)
+        db.add(job)
+        await db.commit()
+
+        await _mark_failed_or_dead(factory, job.id, 2, "exhausted")
+
+        async with factory() as fresh_db:
+            row = (
+                await fresh_db.execute(select(WritebackJob).where(WritebackJob.id == job.id))
+            ).scalar_one()
+        assert row.status == "dead"
+        assert row.completed_at is not None, "completed_at must be set when a job dies"
+
+    @pytest.mark.asyncio
+    async def test_failed_does_not_set_completed_at(
+        self, db: AsyncSession, factory: async_sessionmaker[AsyncSession], location: Location
+    ):
+        """When a job is marked failed (not dead), completed_at stays None."""
+        job = _make_job(location.id, "cancel_booking", CANCEL_PAYLOAD, attempt_count=0)
+        db.add(job)
+        await db.commit()
+
+        await _mark_failed_or_dead(factory, job.id, 0, "first failure")
+
+        async with factory() as fresh_db:
+            row = (
+                await fresh_db.execute(select(WritebackJob).where(WritebackJob.id == job.id))
+            ).scalar_one()
+        assert row.status == "failed"
+        assert row.completed_at is None, "completed_at must stay None for retryable failures"
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# TestJobClaimingExtra  — status transition and FIFO ordering
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+class TestJobClaimingExtra:
+    @pytest.mark.asyncio
+    async def test_claim_transitions_job_to_running(
+        self, db: AsyncSession, factory: async_sessionmaker[AsyncSession], location: Location
+    ):
+        """After claiming, the job row is updated to status='running'."""
+        job = _make_job(location.id, "create_customer", CUSTOMER_PAYLOAD)
+        db.add(job)
+        await db.commit()
+
+        await _claim_next_job(factory)
+
+        async with factory() as fresh_db:
+            row = (
+                await fresh_db.execute(select(WritebackJob).where(WritebackJob.id == job.id))
+            ).scalar_one()
+        assert row.status == "running"
+
+    @pytest.mark.asyncio
+    async def test_claim_sets_started_at(
+        self, db: AsyncSession, factory: async_sessionmaker[AsyncSession], location: Location
+    ):
+        """Claiming a job populates started_at."""
+        job = _make_job(location.id, "create_customer", CUSTOMER_PAYLOAD)
+        db.add(job)
+        await db.commit()
+        assert job.started_at is None
+
+        await _claim_next_job(factory)
+
+        async with factory() as fresh_db:
+            row = (
+                await fresh_db.execute(select(WritebackJob).where(WritebackJob.id == job.id))
+            ).scalar_one()
+        assert row.started_at is not None, "started_at must be set after claiming"
+
+    @pytest.mark.asyncio
+    async def test_claims_oldest_job_first(
+        self, db: AsyncSession, factory: async_sessionmaker[AsyncSession], location: Location
+    ):
+        """_claim_next_job respects FIFO order (oldest created_at first)."""
+        from datetime import timedelta
+
+        now = datetime.now(timezone.utc)
+        # Insert newer job first
+        guard = SafetyGuard(mode="prod")
+        newer_job = WritebackJob(
+            id=uuid.uuid4(),
+            location_id=location.id,
+            job_type="create_customer",
+            payload={**CUSTOMER_PAYLOAD, "email": "newer@example.com"},
+            idempotency_key=guard.make_create_customer_key(str(location.id), "newer@example.com"),
+            status="queued",
+        )
+        older_job = WritebackJob(
+            id=uuid.uuid4(),
+            location_id=location.id,
+            job_type="create_customer",
+            payload={**CUSTOMER_PAYLOAD, "email": "older@example.com"},
+            idempotency_key=guard.make_create_customer_key(str(location.id), "older@example.com"),
+            status="queued",
+        )
+        db.add_all([newer_job, older_job])
+        await db.flush()
+        # Manually backdate older_job by setting created_at earlier
+        from sqlalchemy import update as sa_update
+        await db.execute(
+            sa_update(WritebackJob)
+            .where(WritebackJob.id == older_job.id)
+            .values(created_at=now - timedelta(minutes=10))
+        )
+        await db.commit()
+
+        claimed = await _claim_next_job(factory)
+        assert claimed is not None
+        # The older job must be claimed first
+        assert claimed[0] == older_job.id, (
+            f"Expected older_job ({older_job.id}) to be claimed first, "
+            f"got {claimed[0]}"
+        )
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# TestExecutorEdgeCases  — AuditError dead path, unknown job_type, webhook gaps
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+class TestExecutorEdgeCases:
+    """Covers code paths not reached by TestExecutorDryRun / TestExecutorWithRetryIntegration."""
+
+    @pytest.mark.asyncio
+    async def test_audit_error_marks_dead_immediately(
+        self, db: AsyncSession, factory: async_sessionmaker[AsyncSession], location: Location
+    ):
+        """
+        If record_writeback raises AuditError during a live (non-dry-run) success,
+        the executor must mark the job dead immediately — no retry scheduled.
+
+        This is the hardest-to-hit code path: handler succeeds, but the mandatory
+        audit log write fails.  Per safety constraints audit failure == test failure,
+        so dead is the correct outcome.
+        """
+        import app.writeback.executor as executor_module
+        from app.writeback.audit import AuditError
+
+        job = _make_job(location.id, "create_customer", CUSTOMER_PAYLOAD)
+        db.add(job)
+        await db.commit()
+
+        orig_fire = executor_module._fire_ghl_webhook
+
+        async def fake_fire(url, payload, label):
+            return None  # silence webhooks
+
+        executor_module._fire_ghl_webhook = fake_fire
+
+        try:
+            with (
+                patch(
+                    "app.writeback.executor._load_handler",
+                    return_value=AsyncMock(
+                        return_value={"customer_id": "C001", "status": "created"}
+                    ),
+                ),
+                patch(
+                    "app.writeback.audit.record_writeback",
+                    side_effect=AuditError("disk full"),
+                ),
+            ):
+                await execute_writeback_job(
+                    job.id,
+                    location.id,
+                    "create_customer",
+                    CUSTOMER_PAYLOAD,
+                    job.idempotency_key,
+                    0,
+                    factory,
+                    dry_run=False,  # Live mode so record_writeback is called
+                    safety_mode="prod",  # bypass whitelist
+                )
+        finally:
+            executor_module._fire_ghl_webhook = orig_fire
+
+        async with factory() as fresh_db:
+            row = (
+                await fresh_db.execute(select(WritebackJob).where(WritebackJob.id == job.id))
+            ).scalar_one()
+        assert row.status == "dead", (
+            f"AuditError must mark job dead immediately, got status='{row.status}'"
+        )
+        assert "AuditError" in (row.error or ""), (
+            f"Error field must mention AuditError, got '{row.error}'"
+        )
+        # Dead from AuditError must NOT schedule a retry
+        assert row.next_retry_at is None
+
+    @pytest.mark.asyncio
+    async def test_unknown_job_type_marks_failed(
+        self, db: AsyncSession, factory: async_sessionmaker[AsyncSession], location: Location
+    ):
+        """
+        A job with an unregistered job_type causes _load_handler to raise ValueError.
+        This is a generic exception, so the retry policy applies (not dead immediately).
+        """
+        guard = SafetyGuard(mode="prod")
+        idem = guard.make_create_customer_key(str(location.id), "unknown@test.com")
+        job = WritebackJob(
+            id=uuid.uuid4(),
+            location_id=location.id,
+            job_type="teleport_customer",  # unregistered type
+            payload={"email": "unknown@test.com"},
+            idempotency_key=idem,
+        )
+        db.add(job)
+        await db.commit()
+
+        await execute_writeback_job(
+            job.id,
+            location.id,
+            "teleport_customer",
+            {"email": "unknown@test.com"},
+            idem,
+            0,
+            factory,
+            dry_run=True,
+            safety_mode="dev",
+        )
+
+        async with factory() as fresh_db:
+            row = (
+                await fresh_db.execute(select(WritebackJob).where(WritebackJob.id == job.id))
+            ).scalar_one()
+        # ValueError from _load_handler is a generic exception → first retry
+        assert row.status == "failed"
+        assert row.attempt_count == 1
+        assert "ValueError" in (row.error or "")
+
+    @pytest.mark.asyncio
+    async def test_safety_guard_fires_ghl_failure_webhook(
+        self, db: AsyncSession, factory: async_sessionmaker[AsyncSession], location: Location
+    ):
+        """
+        When the safety guard rejects a job, the GHL failure webhook must still fire
+        (if a URL is configured).  The existing test omits the URL; this one provides it.
+        """
+        bad_payload = {**CUSTOMER_PAYLOAD, "email": "intruder@evil.com"}
+        guard = SafetyGuard(mode="prod")
+        idem = guard.make_create_customer_key(str(location.id), "intruder@evil.com")
+        job = WritebackJob(
+            id=uuid.uuid4(),
+            location_id=location.id,
+            job_type="create_customer",
+            payload=bad_payload,
+            idempotency_key=idem,
+        )
+        db.add(job)
+        await db.commit()
+
+        webhook_calls: list[str] = []
+
+        import app.writeback.executor as executor_module
+        orig_fire = executor_module._fire_ghl_webhook
+
+        async def fake_fire(url, payload, label):
+            if url:
+                webhook_calls.append(label)
+            return label if url else None
+
+        executor_module._fire_ghl_webhook = fake_fire
+
+        try:
+            await execute_writeback_job(
+                job.id,
+                location.id,
+                "create_customer",
+                bad_payload,
+                idem,
+                0,
+                factory,
+                dry_run=True,
+                safety_mode="dev",
+                ghl_failure_webhook_url="https://hooks.ghl.test/fail",
+            )
+        finally:
+            executor_module._fire_ghl_webhook = orig_fire
+
+        async with factory() as fresh_db:
+            row = (
+                await fresh_db.execute(select(WritebackJob).where(WritebackJob.id == job.id))
+            ).scalar_one()
+        assert row.status == "dead"
+        assert "writeback-failed" in webhook_calls, (
+            "GHL failure webhook must fire even when safety guard rejects the job"
+        )
+
+    @pytest.mark.asyncio
+    async def test_no_ghl_webhook_when_url_is_none(
+        self, db: AsyncSession, factory: async_sessionmaker[AsyncSession], location: Location
+    ):
+        """
+        Passing no webhook URLs causes zero HTTP calls — no error, just silent skip.
+        Verified by patching _fire_ghl_webhook and asserting it returned None.
+        """
+        job = _make_job(location.id, "create_customer", CUSTOMER_PAYLOAD, attempt_count=2)
+        db.add(job)
+        await db.commit()
+
+        fire_results: list = []
+
+        import app.writeback.executor as executor_module
+        orig_fire = executor_module._fire_ghl_webhook
+
+        async def tracking_fire(url, payload, label):
+            result = await orig_fire(url, payload, label)
+            fire_results.append(result)
+            return result
+
+        executor_module._fire_ghl_webhook = tracking_fire
+
+        try:
+            with patch(
+                "app.writeback.executor._load_handler",
+                return_value=AsyncMock(side_effect=RuntimeError("boom")),
+            ):
+                await execute_writeback_job(
+                    job.id, location.id, "create_customer", CUSTOMER_PAYLOAD,
+                    job.idempotency_key, 2, factory,
+                    dry_run=True, safety_mode="dev",
+                    # No webhook URLs provided
+                )
+        finally:
+            executor_module._fire_ghl_webhook = orig_fire
+
+        # fire_results list has one entry (for the dead → failure webhook call)
+        # but since URL was None, it must have returned None (not raised)
+        assert all(r is None for r in fire_results), (
+            f"All webhook calls with no URL should return None, got {fire_results}"
+        )
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # Helpers
 # ─────────────────────────────────────────────────────────────────────────────
 
