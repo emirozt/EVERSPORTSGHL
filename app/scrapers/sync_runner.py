@@ -296,27 +296,55 @@ async def run_sync(
 
     scraper_duration = time.monotonic() - run_start
 
+    ghl_synced = ghl_result.contacts_synced if ghl_result else 0
+    ghl_created = ghl_result.contacts_created if ghl_result else 0
+    ghl_updated = ghl_result.contacts_updated if ghl_result else 0
+    ghl_failed = ghl_result.contacts_failed if ghl_result else 0
+    ghl_tags = ghl_result.tags_applied if ghl_result else 0
+    ghl_moves = ghl_result.pipeline_moves if ghl_result else 0
+
     logger.info(
         "sync_runner: complete run_type=%s location_id=%s "
-        "contacts=%d bookings=%d sessions=%d duration=%.2fs",
+        "contacts=%d bookings=%d sessions=%d "
+        "ghl_synced=%d ghl_created=%d ghl_failed=%d duration=%.2fs",
         run_type,
         location_id,
         bootstrap_result["contacts_seeded"],
         bootstrap_result["bookings_seeded"],
         bootstrap_result["sessions_seeded"],
+        ghl_synced,
+        ghl_created,
+        ghl_failed,
         scraper_duration,
     )
+
+    # ── Write success SyncLog ──────────────────────────────────────────────────
+    sync_log = SyncLog(
+        id=uuid.uuid4(),
+        location_id=location_id,
+        run_type=run_type,
+        contacts_processed=bootstrap_result["contacts_seeded"],
+        contacts_updated=ghl_updated,
+        tags_applied=ghl_tags,
+        pipeline_moves=ghl_moves,
+        ghl_contacts_synced=ghl_synced,
+        ghl_contacts_created=ghl_created,
+        ghl_contacts_failed=ghl_failed,
+        errors=list(bootstrap_result.get("errors", [])),
+        duration_seconds=round(scraper_duration, 3),
+    )
+    db.add(sync_log)
 
     return {
         **bootstrap_result,
         "run_type": run_type,
         "scraper_duration_seconds": round(scraper_duration, 3),
-        "ghl_contacts_synced": ghl_result.contacts_synced if ghl_result else 0,
-        "ghl_contacts_created": ghl_result.contacts_created if ghl_result else 0,
-        "ghl_contacts_updated": ghl_result.contacts_updated if ghl_result else 0,
-        "ghl_contacts_failed": ghl_result.contacts_failed if ghl_result else 0,
-        "ghl_tags_applied": ghl_result.tags_applied if ghl_result else 0,
-        "ghl_pipeline_moves": ghl_result.pipeline_moves if ghl_result else 0,
+        "ghl_contacts_synced": ghl_synced,
+        "ghl_contacts_created": ghl_created,
+        "ghl_contacts_updated": ghl_updated,
+        "ghl_contacts_failed": ghl_failed,
+        "ghl_tags_applied": ghl_tags,
+        "ghl_pipeline_moves": ghl_moves,
     }
 
 

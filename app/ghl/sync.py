@@ -164,13 +164,12 @@ async def sync_contact(
             result.pipeline_moves = moves_done
 
         # ── Step 5: Update prev_state snapshot ────────────────────────────────
-        # Compute the new desired tag set for persistence
-        from app.delta.flags import compute_flags  # noqa: PLC0415
-        flags = compute_flags(contact, location)
+        # delta.flags was computed inside compute_delta — reuse it directly
+        # rather than calling compute_flags a second time.
+        flags = delta.flags
         new_tags = (current_tags | set(result.tags_added)) - set(result.tags_removed)
 
         # Pipeline stage tracking
-        from app.delta.flags import LeadStage, CardStage, MembershipStage  # noqa: PLC0415
         new_lead = flags.lead_stage or current_lead_stage
         new_card = flags.card_stage or current_card_stage
         new_membership = flags.membership_stage or current_membership_stage

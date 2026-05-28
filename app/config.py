@@ -22,6 +22,13 @@ class Settings(BaseSettings):
     ghl_oauth_client_secret: str | None = None
     ghl_webhook_signing_secret: str | None = None
     ghl_redirect_uri: str | None = None
+    # HMAC secret for OAuth state parameter (prevents CSRF on the install flow).
+    # Generate with: python -c "import secrets; print(secrets.token_hex(32))"
+    ghl_install_secret: str | None = None
+
+    # Admin API
+    # Protects the GHL OAuth admin endpoints.  Set in .env as ADMIN_API_KEY=...
+    admin_api_key: str | None = None
 
     # AI
     anthropic_api_key: str | None = None

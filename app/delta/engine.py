@@ -44,12 +44,35 @@ class PipelineMove:
     new_stage: str       # Must match GHL stage name exactly
 
 
+# Tags that should NEVER be removed by the delta engine (only removed by
+# specific use case workflows or manually by studio staff).
+# Defined here (before compute_delta) so it is visible to readers top-to-bottom.
+_NEVER_REMOVE_TAGS: frozenset[str] = frozenset({
+    "trial-not-converted",  # Permanent failure marker
+    "trial-converted",      # Permanent achievement marker
+    "trial-follow-up-active",  # Managed by UC01 workflow
+    "chatbot-active",          # Managed by UC04 workflow
+    "chatbot-sale-initiated",  # Managed by UC04 workflow
+    "chatbot-converted",       # Permanent achievement marker
+    "chatbot-handoff",         # Managed by UC04 workflow
+    "opted-out",               # Only removed manually by studio staff
+    "reschedule-in-flight",    # Managed by UC05 writeback
+    "cancel-in-flight",        # Managed by UC05 writeback
+    "writeback-failed",        # Managed by operator resolution
+})
+
+
 @dataclass
 class GhlDelta:
     """
     The full set of changes to apply to GHL for one contact.
 
     All fields default to empty — callers only act on non-empty collections.
+
+    ``flags`` is populated by ``compute_delta`` and carries the ``ContactFlags``
+    used to derive tags and pipeline stages.  Consumers (e.g. ``ghl.sync``) can
+    read it to build the new ``ghl_prev_state`` without calling ``compute_flags``
+    a second time.
     """
     # Custom field key → new value (only fields that changed vs prev_state)
     custom_fields: dict[str, Any] = field(default_factory=dict)
@@ -63,6 +86,10 @@ class GhlDelta:
 
     # Whether to create a new GHL contact (True if contact has no ghl_contact_id)
     needs_create: bool = False
+
+    # ContactFlags used to derive tags + pipeline stages — set by compute_delta.
+    # Consumers can use this instead of re-calling compute_flags.
+    flags: ContactFlags = field(default_factory=ContactFlags)
 
     @property
     def is_empty(self) -> bool:
@@ -177,7 +204,13 @@ def compute_delta(
                 delta.custom_fields[ghl_key] = new_val
 
     # ── Tags ───────────────────────────────────────────────────────────────────
-    flags: ContactFlags = compute_flags(contact, location, today=today)
+    # Pass current_ghl_tags into compute_flags so it can evaluate tags that live
+    # in NEVER_REMOVE_TAGS (e.g. trial-not-converted set by UC01 workflow).
+    flags: ContactFlags = compute_flags(
+        contact, location,
+        today=today,
+        current_ghl_tags=current_ghl_tags,
+    )
     desired_tags = flags.tags_desired
     current_tags = current_ghl_tags or set()
 
@@ -189,24 +222,10 @@ def compute_delta(
     _add_pipeline_move(delta, "card", flags.card_stage, current_card_stage)
     _add_pipeline_move(delta, "membership", flags.membership_stage, current_membership_stage)
 
+    # Attach flags so callers can read pipeline/tag decisions without re-computing.
+    delta.flags = flags
+
     return delta
-
-
-# Tags that should NEVER be removed by the delta engine (only removed by
-# specific use case workflows or manually by studio staff).
-_NEVER_REMOVE_TAGS: frozenset[str] = frozenset({
-    "trial-not-converted",  # Permanent failure marker
-    "trial-converted",      # Permanent achievement marker
-    "trial-follow-up-active",  # Managed by UC01 workflow
-    "chatbot-active",          # Managed by UC04 workflow
-    "chatbot-sale-initiated",  # Managed by UC04 workflow
-    "chatbot-converted",       # Permanent achievement marker
-    "chatbot-handoff",         # Managed by UC04 workflow
-    "opted-out",               # Only removed manually by studio staff
-    "reschedule-in-flight",    # Managed by UC05 writeback
-    "cancel-in-flight",        # Managed by UC05 writeback
-    "writeback-failed",        # Managed by operator resolution
-})
 
 
 def _add_pipeline_move(

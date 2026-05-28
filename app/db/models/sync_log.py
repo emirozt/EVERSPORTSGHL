@@ -42,6 +42,17 @@ class SyncLog(Base):
         JSON, nullable=False, server_default=text("'[]'")
     )
 
+    # ── GHL push counters (populated after M3 GHL sync) ─────────────────────
+    ghl_contacts_synced: Mapped[int] = mapped_column(
+        Integer, nullable=False, server_default=text("0")
+    )
+    ghl_contacts_created: Mapped[int] = mapped_column(
+        Integer, nullable=False, server_default=text("0")
+    )
+    ghl_contacts_failed: Mapped[int] = mapped_column(
+        Integer, nullable=False, server_default=text("0")
+    )
+
     # ── Bootstrap tracking ────────────────────────────────────────────────
     bootstrap_run_id: Mapped[uuid.UUID | None] = mapped_column(Uuid(as_uuid=True), nullable=True)
 

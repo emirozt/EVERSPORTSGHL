@@ -383,6 +383,23 @@ class TestComputeFlags:
         flags = compute_flags(c, self._loc(), today=_TODAY)
         assert flags.lead_stage is None
 
+    def test_lead_stage_lost_when_trial_not_converted_in_ghl_tags(self):
+        """
+        trial-not-converted is set by the UC01 workflow externally and lives in
+        NEVER_REMOVE_TAGS — compute_flags must check current_ghl_tags, not
+        tags_desired, to detect it.
+        """
+        c = self._make()  # No active package, no history
+        ghl_tags = {"trial-not-converted"}
+        flags = compute_flags(c, self._loc(), today=_TODAY, current_ghl_tags=ghl_tags)
+        assert flags.lead_stage == LeadStage.LOST
+
+    def test_lead_stage_not_lost_without_ghl_tag(self):
+        """Without trial-not-converted in GHL tags, Lost stage is not set."""
+        c = self._make()
+        flags = compute_flags(c, self._loc(), today=_TODAY, current_ghl_tags=set())
+        assert flags.lead_stage != LeadStage.LOST
+
 
 # ── Delta Engine ───────────────────────────────────────────────────────────────
 
@@ -546,6 +563,19 @@ class TestComputeDelta:
             today=_TODAY,
         )
         assert not delta.pipeline_moves
+
+    def test_delta_flags_attached(self):
+        """compute_delta should set delta.flags so callers avoid a second compute_flags call."""
+        c = self._contact(
+            ghl_contact_id=None,
+            active_package_type="trial",
+            total_sessions_attended=2,
+        )
+        loc = self._location()
+        delta = compute_delta(c, loc, today=_TODAY)
+        # delta.flags must be populated and agree with the pipeline moves
+        assert delta.flags is not None
+        assert delta.flags.lead_stage == LeadStage.TRIAL_BOOKED
 
     def test_is_empty_on_fully_synced_contact(self):
         """Contact with all fields matching prev_state and correct tags → empty delta."""

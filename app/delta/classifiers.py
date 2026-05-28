@@ -52,9 +52,16 @@ _BUILTIN_RULES: list[tuple[str, list[str]]] = [
         "karte", "card",
         "10er", "5er", "3er", "20er", "8er",
         "punch", "block",
-        "voucher", "gutschein",   # vouchers are often treated as cards in Eversports
+        # "voucher" and "gutschein" are intentionally listed here, not in the
+        # "voucher" bucket below.  In Eversports, gift vouchers are sold as
+        # card-like products (they grant class credits).  This means the built-in
+        # "voucher" ProductType is unreachable without a per-location keyword_map
+        # override — which is by design for studios that sell standalone gift
+        # vouchers they want to track separately.
+        "voucher", "gutschein",
     ]),
     ("voucher", [
+        # Only reachable via per-location keyword_map override (see above).
         "geschenkgutschein", "gift",
     ]),
     ("drop_in", [

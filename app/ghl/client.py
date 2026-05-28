@@ -193,10 +193,14 @@ class GhlClient:
             raise RuntimeError("GhlClient must be used as a context manager")
 
         token = await self._get_access_token()
-        headers = {"Authorization": f"Bearer {token}"}
 
-        async with self._semaphore:
-            for attempt in range(_MAX_RETRIES):
+        for attempt in range(_MAX_RETRIES):
+            headers = {"Authorization": f"Bearer {token}"}
+
+            # Acquire semaphore only for the actual HTTP call — not during sleep.
+            # Holding the semaphore across asyncio.sleep() would starve other
+            # concurrent requests for the full back-off duration.
+            async with self._semaphore:
                 resp = await self._http.request(
                     method,
                     path,
@@ -205,40 +209,40 @@ class GhlClient:
                     params=params,
                 )
 
-                if resp.status_code == 429:
-                    retry_after = float(resp.headers.get("Retry-After", _BASE_BACKOFF_SECONDS * (2 ** attempt)))
-                    logger.warning(
-                        "ghl_client: 429 rate limit on %s %s — waiting %.1fs",
-                        method, path, retry_after,
-                    )
-                    await asyncio.sleep(retry_after)
-                    # Refresh token in case it expired during wait
-                    token = await self._get_access_token()
-                    headers = {"Authorization": f"Bearer {token}"}
+            if resp.status_code == 429:
+                retry_after = float(
+                    resp.headers.get("Retry-After", _BASE_BACKOFF_SECONDS * (2 ** attempt))
+                )
+                logger.warning(
+                    "ghl_client: 429 rate limit on %s %s — waiting %.1fs (attempt %d/%d)",
+                    method, path, retry_after, attempt + 1, _MAX_RETRIES,
+                )
+                await asyncio.sleep(retry_after)
+                # Refresh token in case it expired during the wait
+                token = await self._get_access_token()
+                continue
+
+            if resp.status_code == 401:
+                # Token may have just expired — try one forced refresh
+                if attempt == 0:
+                    logger.warning("ghl_client: 401 on %s — forcing token refresh", path)
+                    cache = self._location.ghl_oauth_token_cache or {}
+                    new_cache = await self._refresh_token(cache.get("refresh_token", ""))
+                    await self._persist_token_cache(new_cache)
+                    token = new_cache["access_token"]
                     continue
+                raise GhlAuthError(f"GHL returned 401 after token refresh for {path}")
 
-                if resp.status_code == 401:
-                    # Token may have just expired — try one refresh
-                    if attempt == 0:
-                        logger.warning("ghl_client: 401 on %s — forcing token refresh", path)
-                        cache = self._location.ghl_oauth_token_cache or {}
-                        new_cache = await self._refresh_token(cache.get("refresh_token", ""))
-                        await self._persist_token_cache(new_cache)
-                        token = new_cache["access_token"]
-                        headers = {"Authorization": f"Bearer {token}"}
-                        continue
-                    raise GhlAuthError(f"GHL returned 401 after token refresh for {path}")
+            if not (200 <= resp.status_code < 300):
+                raise GhlApiError(resp.status_code, resp.text, path)
 
-                if not (200 <= resp.status_code < 300):
-                    raise GhlApiError(resp.status_code, resp.text, path)
+            # Empty body (e.g. 204 No Content)
+            if not resp.content:
+                return {}
 
-                # Empty body (e.g. 204 No Content)
-                if not resp.content:
-                    return {}
+            return resp.json()
 
-                return resp.json()
-
-        raise GhlApiError(429, "Max retries exceeded", path)  # pragma: no cover
+        raise GhlApiError(429, "Max retries exceeded", path)
 
     # ── Custom field ID resolution ─────────────────────────────────────────────
 
@@ -386,7 +390,19 @@ class GhlClient:
         Returns ``(contact_id, created)`` where ``created`` is True if a new
         contact was created.
         """
-        existing = await self.search_contact_by_email(email or "")
+        # Contacts without email cannot be de-duplicated — create directly.
+        # Passing an empty string to search_contact_by_email is unpredictable
+        # (GHL may return all contacts or a server error).
+        if not email:
+            contact_id = await self.create_contact(
+                first_name=first_name,
+                last_name=last_name,
+                phone=phone,
+                custom_fields=custom_fields,
+            )
+            return contact_id, True
+
+        existing = await self.search_contact_by_email(email)
         if existing:
             contact_id = existing["id"]
             if custom_fields:

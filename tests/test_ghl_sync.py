@@ -458,3 +458,81 @@ class TestSyncContact:
 
         with pytest.raises(GhlAuthError):
             await sync_contact(contact, location, client, cache, db)
+
+
+# ── upsert_contact email guard ─────────────────────────────────────────────────
+
+@pytest.mark.asyncio
+class TestUpsertContactEmailGuard:
+    """Fix #2 — upsert_contact must not search when email is None."""
+
+    def _make_client_inner(self):
+        """Build an httpx-level mock that the real GhlClient internals use."""
+        from app.ghl.client import GhlClient
+        client = MagicMock(spec=GhlClient)
+        client.search_contact_by_email = AsyncMock(return_value=None)
+        client.create_contact = AsyncMock(return_value="new-ghl-id")
+        client.update_contact = AsyncMock()
+        return client
+
+    async def test_no_email_skips_search_and_creates(self):
+        client = self._make_client_inner()
+        # Monkeypatch upsert_contact by calling the real implementation
+        # against the mock
+        from app.ghl.client import GhlClient
+        # We test the logic directly by importing and calling the method
+        # with a real GhlClient that delegates to our mock methods.
+        result_id, created = await GhlClient.upsert_contact(
+            client,  # self=mock
+            email=None,
+            first_name="Anna",
+            last_name="Muster",
+        )
+        client.search_contact_by_email.assert_not_called()
+        client.create_contact.assert_called_once()
+        assert result_id == "new-ghl-id"
+        assert created is True
+
+    async def test_with_email_searches_first(self):
+        client = self._make_client_inner()
+        from app.ghl.client import GhlClient
+        await GhlClient.upsert_contact(
+            client,
+            email="test@example.com",
+            first_name="Anna",
+        )
+        client.search_contact_by_email.assert_called_once_with("test@example.com")
+
+
+# ── OAuth state helpers ────────────────────────────────────────────────────────
+
+class TestOAuthStateHelpers:
+    """Fix #5 — HMAC state parameter for CSRF protection."""
+
+    def test_make_and_verify_state_valid(self):
+        from app.api.v1.admin.ghl_oauth import _make_state, _verify_state
+        secret = "test-secret-abc"
+        location_id = "loc-123"
+        state = _make_state(location_id, secret)
+        assert _verify_state(state, location_id, secret) is True
+
+    def test_wrong_location_id_rejected(self):
+        from app.api.v1.admin.ghl_oauth import _make_state, _verify_state
+        secret = "test-secret-abc"
+        state = _make_state("loc-123", secret)
+        assert _verify_state(state, "loc-DIFFERENT", secret) is False
+
+    def test_wrong_secret_rejected(self):
+        from app.api.v1.admin.ghl_oauth import _make_state, _verify_state
+        state = _make_state("loc-123", "secret-A")
+        assert _verify_state(state, "loc-123", "secret-B") is False
+
+    def test_tampered_state_rejected(self):
+        from app.api.v1.admin.ghl_oauth import _verify_state
+        assert _verify_state("deadbeef" * 8, "loc-123", "secret") is False
+
+    def test_state_is_hex_string(self):
+        from app.api.v1.admin.ghl_oauth import _make_state
+        state = _make_state("loc-123", "any-secret")
+        assert len(state) == 64  # SHA-256 → 32 bytes → 64 hex chars
+        int(state, 16)  # should not raise — valid hex

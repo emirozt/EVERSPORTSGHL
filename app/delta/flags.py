@@ -132,6 +132,7 @@ def compute_flags(
     location: "Location",
     *,
     today: date | None = None,
+    current_ghl_tags: set[str] | None = None,
 ) -> ContactFlags:
     """
     Compute the desired GHL tags and pipeline stages for a contact.
@@ -140,11 +141,18 @@ def compute_flags(
         contact: SQLAlchemy Contact row (all derived fields must be populated).
         location: SQLAlchemy Location row (for per-location thresholds).
         today: Override today's date (for testing). Defaults to ``date.today()``.
+        current_ghl_tags: The tag set currently on the GHL contact (from the last
+            sync snapshot or a live read).  Required to correctly evaluate tags
+            that are set by external workflows (UC01, UC04) and live in
+            ``_NEVER_REMOVE_TAGS`` — these tags are never added by ``compute_flags``
+            itself, but their *presence* must influence pipeline stage decisions.
+            Pass ``None`` (or omit) on first sync; treated as empty set.
 
     Returns:
         ``ContactFlags`` with the desired tag set and pipeline stage names.
     """
     today = today or date.today()
+    ghl_tags: set[str] = current_ghl_tags or set()
     flags = ContactFlags()
     tags = flags.tags_desired
 
@@ -251,7 +259,10 @@ def compute_flags(
         tags.add(Tag.LAPSED)
 
     # ── Pipeline: Lead to Sale ────────────────────────────────────────────────
-    if Tag.TRIAL_NOT_CONVERTED in tags:
+    # TRIAL_NOT_CONVERTED is set by the UC01 follow-up workflow and lives in
+    # _NEVER_REMOVE_TAGS — it is never emitted by compute_flags itself.  We must
+    # check current_ghl_tags (the live GHL state) rather than tags_desired.
+    if Tag.TRIAL_NOT_CONVERTED in ghl_tags:
         flags.lead_stage = LeadStage.LOST
     elif Tag.TRIAL_CONVERTED in tags:
         if active_type == "membership" or is_membership(active_name, keyword_map):
