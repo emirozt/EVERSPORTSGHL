@@ -32,7 +32,7 @@ References:
 """
 
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime
 
 from sqlalchemy import Boolean, DateTime, Index, Text, Uuid, func
 from sqlalchemy.orm import Mapped, mapped_column
@@ -51,7 +51,11 @@ class ConsentAudit(Base):
     )
 
     # GHL contact ID (text, always present — even before our contacts row exists)
-    ghl_contact_id: Mapped[str] = mapped_column(Text, nullable=False, index=True)
+    # No index=True here — the composite idx_consent_audit_ghl_contact_ts in
+    # __table_args__ is the right index for the primary access pattern.
+    # index=True would generate ix_consent_audit_ghl_contact_id (different name
+    # from the migration's idx_*) and create a redundant single-col index.
+    ghl_contact_id: Mapped[str] = mapped_column(Text, nullable=False)
 
     # Optional FK to our internal contacts table (populated when contact is known)
     contact_id: Mapped[uuid.UUID | None] = mapped_column(
@@ -62,10 +66,12 @@ class ConsentAudit(Base):
         # (different name) and create a duplicate index if create_all() is ever called.
     )
 
+    # No index=True — covered by the composite idx_consent_audit_location_ts in
+    # __table_args__. index=True would generate ix_consent_audit_location_id
+    # (naming drift vs migration) and create a redundant single-col index.
     location_id: Mapped[uuid.UUID] = mapped_column(
         Uuid(as_uuid=True),
         nullable=False,
-        index=True,
     )
 
     # email | whatsapp | voice

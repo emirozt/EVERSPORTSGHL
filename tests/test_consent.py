@@ -419,6 +419,41 @@ class TestConsentGate:
         )
         assert result.allowed is True
 
+    @pytest.mark.asyncio
+    async def test_deny_consent_field_no_string(self, db: AsyncSession, location: Location):
+        """'no' string must be treated as no-consent (same as False)."""
+        result = await consent_gate(
+            db,
+            ghl_contact_id="ghl-contact-013",
+            location_id=location.id,
+            channel="email",
+            contact_tags=[],
+            contact_custom_fields={"consent_marketing_email": "no"},
+        )
+        assert result.decision == ConsentDecision.DENY
+
+    @pytest.mark.asyncio
+    async def test_deny_with_contact_id_sets_fk_on_blocked_send_row(
+        self, db: AsyncSession, location: Location
+    ):
+        """Blocked-send row written on DENY must carry the optional contact_id FK."""
+        from sqlalchemy import select  # noqa: PLC0415
+
+        internal_contact_id = uuid.uuid4()
+        await consent_gate(
+            db,
+            ghl_contact_id="ghl-contact-014",
+            location_id=location.id,
+            channel="whatsapp",
+            contact_tags=["opted-out"],
+            contact_custom_fields={},
+            contact_id=internal_contact_id,
+        )
+        await db.flush()
+        rows = (await db.execute(select(ConsentAudit))).scalars().all()
+        assert len(rows) == 1
+        assert rows[0].contact_id == internal_contact_id
+
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # 3. Consent audit record helpers
@@ -1134,3 +1169,89 @@ class TestGHLInboundWebhook:
             json=self._payload("hello", channel="telegram"),
         )
         assert resp.json()["channel"] == "whatsapp"
+
+    def test_stop_returns_exactly_five_ghl_actions(self, client: TestClient):
+        """STOP flow must return exactly 5 ghl_actions (no missing, no extras)."""
+        resp = client.post(
+            "/api/v1/webhooks/ghl/inbound",
+            json=self._payload("STOP"),
+        )
+        actions = resp.json()["ghl_actions"]
+        assert len(actions) == 5
+
+    def test_stop_includes_revoked_at_timestamp_action(self, client: TestClient):
+        """STOP must stamp consent_revoked_{channel}_at = '__now__'."""
+        resp = client.post(
+            "/api/v1/webhooks/ghl/inbound",
+            json=self._payload("STOP", channel="whatsapp"),
+        )
+        actions = resp.json()["ghl_actions"]
+        field_actions = [a for a in actions if a.get("action") == "update_contact_field"]
+        ts_action = next(
+            (a for a in field_actions if a.get("field") == "consent_revoked_whatsapp_at"),
+            None,
+        )
+        assert ts_action is not None, "consent_revoked_whatsapp_at action missing"
+        assert ts_action["value"] == "__now__"
+
+    @pytest.mark.asyncio
+    async def test_stop_writes_revocation_row_to_db(self):
+        """STOP webhook must persist a 'revoked' row to consent_audit."""
+        from sqlalchemy import select  # noqa: PLC0415
+        from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine  # noqa: PLC0415
+
+        eng = create_async_engine("sqlite+aiosqlite:///:memory:", echo=False)
+        async with eng.begin() as conn:
+            await conn.run_sync(Base.metadata.create_all)
+
+        factory = async_sessionmaker(eng, expire_on_commit=False)
+
+        # Create location
+        async with factory() as sess:
+            loc = Location(
+                id=uuid.uuid4(),
+                eversports_studio_id="db-test-studio",
+                ghl_subaccount_id=f"ghl-db-{uuid.uuid4().hex[:8]}",
+                ghl_oauth_token_ref="secret",
+                eversports_credentials_ref="secret",
+                timezone="Europe/Vienna",
+                studio_owner_email="owner@db.test",
+                studio_name="DB Test Studio",
+                location_name="DB Test Studio — Main",
+                eversports_cookie_state="ok",
+                historical_sync_flag="pending",
+            )
+            sess.add(loc)
+            await sess.commit()
+
+        app = _make_test_app(factory)
+        with patch("app.config.get_settings") as mock_s:
+            mock_s.return_value.ghl_webhook_skip_sig_check = True
+            with TestClient(app, raise_server_exceptions=True) as client:
+                resp = client.post(
+                    "/api/v1/webhooks/ghl/inbound",
+                    json={
+                        "type": "InboundMessage",
+                        "locationId": loc.ghl_subaccount_id,
+                        "contactId": "ghl-db-contact-001",
+                        "channel": "whatsapp",
+                        "messageBody": "STOP",
+                        "locale": "de-AT",
+                    },
+                )
+        assert resp.status_code == 200
+        assert resp.json()["is_stop"] is True
+
+        # Verify DB row
+        async with factory() as sess:
+            rows = (await sess.execute(select(ConsentAudit))).scalars().all()
+        assert len(rows) == 1
+        row = rows[0]
+        assert row.event == "revoked"
+        assert row.channel == "whatsapp"
+        assert row.ghl_contact_id == "ghl-db-contact-001"
+        assert row.source == "stop-keyword"
+        assert row.actor == "customer"
+        assert row.message_shown == "STOP"
+
+        await eng.dispose()

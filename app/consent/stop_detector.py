@@ -37,11 +37,11 @@ DEFAULT_STOP_REGEX = re.compile(
 
 def _normalise(text: str) -> str:
     """
-    Normalise Unicode text for matching:
-      - Strip leading/trailing whitespace.
-      - Decompose + strip combining marks (ö → o, ü → u, etc.) so a plain
-        ASCII "aufhoeren" also matches.
-    We match against BOTH the original and the decomposed form.
+    Strip leading/trailing whitespace before matching.
+
+    Umlaut normalisation (ö → oe etc.) is handled separately by `_ascii_fold`,
+    which is called on the stripped result.  We match against BOTH the original
+    and the folded form so that "aufhören" and "aufhoeren" are both recognised.
     """
     return text.strip()
 
