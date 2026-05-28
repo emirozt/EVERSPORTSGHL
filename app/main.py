@@ -1,3 +1,4 @@
+import asyncio
 import logging
 from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
@@ -8,9 +9,12 @@ from fastapi import FastAPI
 from app.api.health import router as health_router
 from app.api.v1.admin.bootstrap import router as bootstrap_router
 from app.api.v1.admin.ghl_oauth import router as ghl_oauth_router
+from app.api.v1.admin.scheduler import router as scheduler_router
 from app.api.v1.admin.sync import router as sync_router
 from app.config import get_settings
 from app.db.session import get_engine
+from app.scheduler.cron import start_scheduler, stop_scheduler
+from app.scheduler.worker import run_worker
 
 logger = logging.getLogger(__name__)
 
@@ -32,7 +36,22 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     engine = get_engine()
     logger.info("Database engine initialised")
 
+    # ── M4: start scheduler and worker ────────────────────────────────────────
+    stop_event = asyncio.Event()
+    worker_task = asyncio.create_task(run_worker(stop_event=stop_event))
+    start_scheduler()
+    logger.info("Scheduler and worker started")
+
     yield
+
+    # ── Graceful shutdown ─────────────────────────────────────────────────────
+    stop_event.set()
+    stop_scheduler()
+    try:
+        await asyncio.wait_for(worker_task, timeout=30)
+    except asyncio.TimeoutError:
+        logger.warning("Worker did not stop within 30s — cancelling")
+        worker_task.cancel()
 
     await engine.dispose()
     logger.info("Database engine disposed")
@@ -50,6 +69,7 @@ def create_app() -> FastAPI:
     app.include_router(bootstrap_router, prefix="/api/v1/admin")
     app.include_router(sync_router, prefix="/api/v1/admin")
     app.include_router(ghl_oauth_router, prefix="/api/v1/admin")
+    app.include_router(scheduler_router, prefix="/api/v1/admin")
     return app
 
 
