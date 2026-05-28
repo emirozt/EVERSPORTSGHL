@@ -86,6 +86,24 @@ class Contact(Base):
     # ── GHL sync fields ───────────────────────────────────────────────────
     # Populated after first GHL sync (M3)
     ghl_contact_id: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # Snapshot of last-pushed GHL custom field values for delta computation
+    ghl_prev_state: Mapped[dict | None] = mapped_column(  # type: ignore[type-arg]
+        JSON, nullable=True
+    )
+    # map of tag_name → ISO timestamp when last applied (60s race-condition guard)
+    ghl_tag_timestamps: Mapped[dict | None] = mapped_column(  # type: ignore[type-arg]
+        JSON, nullable=True
+    )
+    ghl_last_synced_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+
+    # ── Conversion tracking (M3) ──────────────────────────────────────────
+    # First non-trial package name — written by UC02 or delta engine on detection
+    converted_package_name: Mapped[str | None] = mapped_column(Text, nullable=True)
+    conversion_date: Mapped[date | None] = mapped_column(Date, nullable=True)
+    # "chatbot" | "direct" | "in-studio"
+    conversion_source: Mapped[str | None] = mapped_column(Text, nullable=True)
 
     # ── Bootstrap tracking ────────────────────────────────────────────────
     bootstrap_run_id: Mapped[uuid.UUID | None] = mapped_column(Uuid(as_uuid=True), nullable=True)

@@ -107,6 +107,14 @@ class Location(Base):
         Integer, nullable=False, server_default=text("2")
     )
 
+    # ── GHL OAuth token cache (M3) ────────────────────────────────────────────
+    # Stores per-location GHL OAuth tokens injected via the OAuth callback endpoint.
+    # Schema: {"access_token": str, "refresh_token": str, "token_type": str,
+    #          "expires_at": "ISO8601 UTC datetime string"}
+    ghl_oauth_token_cache: Mapped[dict | None] = mapped_column(  # type: ignore[type-arg]
+        JSON, nullable=True
+    )
+
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )

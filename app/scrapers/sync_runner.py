@@ -65,6 +65,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.db.models.location import Location
 from app.db.models.sync_log import SyncLog
+from app.ghl.sync import BatchSyncResult, sync_all_contacts_for_location
 from app.ingest.bootstrap import BootstrapResult, run_bootstrap
 from app.scrapers.admin_csv import AdminApiClient
 from app.scrapers.base import EversportsBaseScraper
@@ -255,7 +256,33 @@ async def run_sync(
         # ── Step 6: Mark session ok ────────────────────────────────────────────
         await scraper._mark_ok()
 
-    # ── Step 7: Post-process for historical_backfill ───────────────────────────
+    # ── Step 7: GHL push — sync all contacts to GHL ───────────────────────────
+    ghl_result: BatchSyncResult | None = None
+    if location.ghl_oauth_token_cache:
+        logger.info("sync_runner: starting GHL push for location_id=%s", location_id)
+        try:
+            ghl_result = await sync_all_contacts_for_location(location_id, db)
+            logger.info(
+                "sync_runner: GHL push complete "
+                "synced=%d created=%d updated=%d failed=%d",
+                ghl_result.contacts_synced,
+                ghl_result.contacts_created,
+                ghl_result.contacts_updated,
+                ghl_result.contacts_failed,
+            )
+            if ghl_result.errors:
+                bootstrap_result["errors"] = list(bootstrap_result["errors"]) + ghl_result.errors
+        except Exception as exc:  # noqa: BLE001
+            msg = f"GHL push failed: {exc}"
+            logger.error("sync_runner: %s", msg, exc_info=True)
+            bootstrap_result["errors"] = list(bootstrap_result["errors"]) + [msg]
+    else:
+        logger.info(
+            "sync_runner: no GHL OAuth tokens for location_id=%s — skipping GHL push",
+            location_id,
+        )
+
+    # ── Step 8: Post-process for historical_backfill ───────────────────────────
     if run_type == "historical_backfill":
         await db.execute(
             update(Location)
@@ -284,6 +311,12 @@ async def run_sync(
         **bootstrap_result,
         "run_type": run_type,
         "scraper_duration_seconds": round(scraper_duration, 3),
+        "ghl_contacts_synced": ghl_result.contacts_synced if ghl_result else 0,
+        "ghl_contacts_created": ghl_result.contacts_created if ghl_result else 0,
+        "ghl_contacts_updated": ghl_result.contacts_updated if ghl_result else 0,
+        "ghl_contacts_failed": ghl_result.contacts_failed if ghl_result else 0,
+        "ghl_tags_applied": ghl_result.tags_applied if ghl_result else 0,
+        "ghl_pipeline_moves": ghl_result.pipeline_moves if ghl_result else 0,
     }
 
 
