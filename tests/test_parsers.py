@@ -60,7 +60,7 @@ class TestParseBookingsCsv:
     def test_known_email(self, bookings_bytes: bytes) -> None:
         rows = parse_bookings_csv(bookings_bytes, TZ)
         emails = [r["email_lower"] for r in rows]
-        assert "anabaezs@gmail.com" in emails
+        assert "test+1@example.com" in emails
 
     def test_datetime_parsing(self, bookings_bytes: bytes) -> None:
         rows = parse_bookings_csv(bookings_bytes, TZ)
@@ -103,8 +103,10 @@ class TestParseBookingsCsv:
     def test_phone_raw_preserved(self, bookings_bytes: bytes) -> None:
         rows = parse_bookings_csv(bookings_bytes, TZ)
         phones = {r["phone_raw"] for r in rows if r["phone_raw"]}
-        assert "015258067348" in phones
-        assert "+491759472221" in phones
+        # Synthetic fixture: row 0 uses 015x format (no country prefix),
+        # remaining rows use +49176xxxxxxxx format.
+        assert "015200000001" in phones
+        assert "+4917600000002" in phones
 
     def test_distinct_emails(self, bookings_bytes: bytes) -> None:
         rows = parse_bookings_csv(bookings_bytes, TZ)
@@ -238,40 +240,44 @@ class TestParseNoshowsCsv:
 
 class TestNormalisePhone:
     """
-    Test all phone formats observed in sample_exports/bookings.csv.
-    Default region = 'DE' (most contacts in the sample are German mobile numbers).
+    Test all phone formats the normaliser must handle.
+    Uses synthetic numbers that match the format classes present in
+    Eversports CSV exports (German 015x / 017x mobiles, +49 prefix,
+    with/without spaces, US numbers).  Default region = 'DE'.
     """
 
     def test_german_mobile_without_prefix(self) -> None:
-        e164, raw = normalise_phone("015258067348", "DE")
-        assert e164 == "+4915258067348"
-        assert raw == "015258067348"
+        # 015x format — no country code, 12 digits total
+        e164, raw = normalise_phone("015200000001", "DE")
+        assert e164 == "+4915200000001"
+        assert raw == "015200000001"
 
     def test_german_mobile_with_plus(self) -> None:
-        e164, raw = normalise_phone("+491759472221", "DE")
-        assert e164 == "+491759472221"
-        assert raw == "+491759472221"
+        # +49 17x format — full E.164 already
+        e164, raw = normalise_phone("+491760000001", "DE")
+        assert e164 == "+491760000001"
+        assert raw == "+491760000001"
 
     def test_german_mobile_short_without_prefix(self) -> None:
-        # 017645699133 is a valid German mobile (017x prefix)
-        e164, raw = normalise_phone("17645699133", "DE")
-        assert e164 == "+4917645699133"
+        # 17x format — no leading 0, no country code
+        e164, raw = normalise_phone("17600000002", "DE")
+        assert e164 == "+4917600000002"
 
-    def test_german_mobile_01783011577(self) -> None:
-        # 01783011577 — German mobile 017x prefix
-        e164, raw = normalise_phone("01783011577", "DE")
+    def test_german_mobile_017x_prefix(self) -> None:
+        # 017x prefix with leading 0
+        e164, raw = normalise_phone("01780000003", "DE")
         assert e164 is not None
         assert e164.startswith("+49")
 
     def test_international_with_spaces(self) -> None:
-        # "+49 152 01581624" — real value from sample
-        e164, raw = normalise_phone("+49 152 01581624", "DE")
-        assert e164 == "+4915201581624"
+        # +49 with spaces between segments — normaliser must strip spaces
+        e164, raw = normalise_phone("+49 152 00000004", "DE")
+        assert e164 == "+4915200000004"
 
     def test_with_trailing_space(self) -> None:
-        # "15 229 852 941 " — trailing space, US or ambiguous number
-        e164, raw = normalise_phone("15 229 852 941 ", "US")
-        assert e164 is not None  # should parse as a US number
+        # Trailing space — normaliser must strip before parsing; use +1 prefix for clarity
+        e164, raw = normalise_phone("+1 415 520 0001 ", "US")
+        assert e164 is not None  # parses as a US number
 
     def test_empty_string_returns_none(self) -> None:
         e164, raw = normalise_phone("", "DE")
@@ -289,8 +295,8 @@ class TestNormalisePhone:
         assert raw == "123"
 
     def test_raw_always_returned(self) -> None:
-        _, raw = normalise_phone("+491759472221", "DE")
-        assert raw == "+491759472221"
+        _, raw = normalise_phone("+491760000001", "DE")
+        assert raw == "+491760000001"
 
 
 class TestTimezoneToRegion:

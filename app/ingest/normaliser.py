@@ -41,9 +41,9 @@ def normalise_phone(raw: str, default_region: str = "DE") -> tuple[str | None, s
     Parse and normalise a phone number to E.164.
 
     Args:
-        raw: Raw phone string as extracted from the CSV (e.g. '015258067348',
-             '+491759472221', '17645699133', '01783011577', '+49 152 01581624',
-             '15 229 852 941 ').
+        raw: Raw phone string as extracted from the CSV (e.g. '015200000001',
+             '+491760000001', '17600000002', '01780000003', '+49 152 00000004',
+             '15 200 000 005 ').
         default_region: ISO-3166-1 alpha-2 region code used when the number has no
                         country prefix. Derived from location.timezone heuristic:
                         Europe/Berlin → 'DE', Europe/Vienna → 'AT',

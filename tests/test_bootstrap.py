@@ -142,7 +142,7 @@ async def test_bootstrap_bookings_count(db: AsyncSession, test_location: Locatio
     await db.commit()
 
     count = await _count(db, Booking, test_location.id)
-    # The duplicate row (zevcan92@googlemail.com) has the same synthetic booking ID
+    # The duplicate row (test+28@example.com) has the same synthetic booking ID
     # (same email + same datetime + same activity) → ON CONFLICT DO NOTHING → 28 unique bookings
     assert count == 28, f"Expected 28 bookings (duplicate row deduped), got {count}"
     assert result["bookings_seeded"] == 28
@@ -326,13 +326,15 @@ async def test_bootstrap_contact_derived_fields(db: AsyncSession, test_location:
     result = await db.execute(
         select(Contact).where(
             Contact.location_id == test_location.id,
-            Contact.email_lower == "anabaezs@gmail.com",
+            Contact.email_lower == "test+1@example.com",
         )
     )
     contact = result.scalar_one_or_none()
     assert contact is not None
 
-    # Ana Baez has 1 booking with Attended=yes
+    # test+1@example.com appears twice in the fixture (row 0 + duplicate row 28),
+    # but both rows map to the same booking (same email+datetime+activity → deduped).
+    # The contact has 1 attended booking.
     assert contact.total_sessions_attended == 1
     assert contact.no_show_count == 0
     assert contact.last_session_date is not None

@@ -38,3 +38,26 @@ htmlcov/
 # Playwright
 playwright-report/
 test-results/
+# Playwright auth state / browser storage (may contain session cookies)
+**/auth.json
+**/pw-auth*.json
+**/.auth/
+playwright/.auth/
+
+# Secrets and credentials
+secrets/
+*.pem
+*.key
+*.p12
+
+# Audit / ops logs (contain live customer data)
+ops/m5_writeback_audit.log
+ops/*.log
+
+# Bootstrap / scraper CSV exports (may contain real customer data).
+# The synthetic anonymised fixtures in requirements_v2/sample_exports/ are
+# force-tracked via 'git add -f' and are safe to commit.
+*.csv
+
+# Local credential files
+*.har
