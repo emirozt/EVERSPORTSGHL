@@ -36,7 +36,7 @@ import uuid
 from datetime import datetime, timezone
 from typing import Any
 
-from fastapi import APIRouter, Depends, HTTPException, Security, status
+from fastapi import APIRouter, Body, Depends, HTTPException, Security, status
 from fastapi.security import APIKeyHeader
 from pydantic import BaseModel
 from sqlalchemy import func, select, update
@@ -93,6 +93,12 @@ class JobSummary(BaseModel):
     error: str | None
 
 
+class JobListResponse(BaseModel):
+    location_id: str
+    jobs: list[JobSummary]
+    count: int
+
+
 # ── Helpers ────────────────────────────────────────────────────────────────────
 
 
@@ -104,19 +110,19 @@ def _fmt_dt(dt: datetime | None) -> str | None:
     return dt.isoformat()
 
 
-def _job_to_summary(job: SchedulerJob) -> dict[str, Any]:
-    return {
-        "id": str(job.id),
-        "location_id": str(job.location_id),
-        "job_type": job.job_type,
-        "run_type": job.run_type,
-        "scheduled_at": _fmt_dt(job.scheduled_at),
-        "status": job.status,
-        "created_at": _fmt_dt(job.created_at),
-        "started_at": _fmt_dt(job.started_at),
-        "completed_at": _fmt_dt(job.completed_at),
-        "error": job.error,
-    }
+def _job_to_summary(job: SchedulerJob) -> JobSummary:
+    return JobSummary(
+        id=str(job.id),
+        location_id=str(job.location_id),
+        job_type=job.job_type,
+        run_type=job.run_type,
+        scheduled_at=_fmt_dt(job.scheduled_at) or "",
+        status=job.status,
+        created_at=_fmt_dt(job.created_at) or "",
+        started_at=_fmt_dt(job.started_at),
+        completed_at=_fmt_dt(job.completed_at),
+        error=job.error,
+    )
 
 
 # ── Endpoints ──────────────────────────────────────────────────────────────────
@@ -154,12 +160,12 @@ async def scheduler_status(
     }
 
 
-@router.get("/jobs/{location_id}", dependencies=[Depends(_require_admin)])
+@router.get("/jobs/{location_id}", response_model=JobListResponse, dependencies=[Depends(_require_admin)])
 async def list_jobs(
     location_id: uuid.UUID,
     db: AsyncSession = Depends(get_db),
     limit: int = 50,
-) -> dict[str, Any]:
+) -> JobListResponse:
     """
     List the most recent scheduler_jobs for a location (newest first).
 
@@ -173,17 +179,17 @@ async def list_jobs(
         .limit(min(limit, 200))
     )
     jobs = (await db.execute(stmt)).scalars().all()
-    return {
-        "location_id": str(location_id),
-        "jobs": [_job_to_summary(j) for j in jobs],
-        "count": len(jobs),
-    }
+    return JobListResponse(
+        location_id=str(location_id),
+        jobs=[_job_to_summary(j) for j in jobs],
+        count=len(jobs),
+    )
 
 
 @router.post("/trigger/{location_id}", dependencies=[Depends(_require_admin)])
 async def trigger_jobs(
     location_id: uuid.UUID,
-    body: TriggerRequest = Depends(),
+    body: TriggerRequest = Body(default_factory=TriggerRequest),
     db: AsyncSession = Depends(get_db),
 ) -> dict[str, Any]:
     """

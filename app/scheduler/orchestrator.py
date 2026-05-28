@@ -111,6 +111,11 @@ async def compute_daily_schedule(
     if target_date is None:
         target_date = _now_utc()
 
+    # Normalise to UTC so the midnight boundary is UTC-based.  If the caller
+    # passes a timezone-aware non-UTC datetime, convert it first — a silent
+    # tzinfo replacement would query the wrong calendar day.
+    if target_date.tzinfo is not None:
+        target_date = target_date.astimezone(timezone.utc)
     day_start = target_date.replace(hour=0, minute=0, second=0, microsecond=0, tzinfo=timezone.utc)
     day_end = day_start + timedelta(days=1)
 
@@ -204,7 +209,9 @@ async def enqueue_hourly_catchup(
     """
     if at is None:
         now = _now_utc()
-        at = (now + timedelta(hours=1)).replace(minute=0, second=0, microsecond=0)
+        # Round DOWN to the current whole hour so the job is due immediately.
+        # (The previous code rounded up to now+1h, causing a consistent 1-hour lag.)
+        at = now.replace(minute=0, second=0, microsecond=0)
 
     # Determine the location's timezone for the local-hour check
     tz_row = (

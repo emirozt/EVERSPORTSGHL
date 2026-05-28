@@ -26,7 +26,6 @@ Usage:
 
 from __future__ import annotations
 
-import asyncio
 import logging
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler  # type: ignore[import-untyped]
@@ -55,7 +54,12 @@ async def _for_all_locations(job_type: str) -> None:
     """
     factory = get_session_factory()
     async with factory() as db:
-        result = await db.execute(select(Location.id))
+        # Only enqueue for locations whose Eversports session is live.
+        # Skipping 'unset' (never onboarded) and 'expired' (needs re-import)
+        # avoids accumulating predictably-failing job records every cron tick.
+        result = await db.execute(
+            select(Location.id).where(Location.eversports_cookie_state == "ok")
+        )
         location_ids = [row[0] for row in result.fetchall()]
 
     for location_id in location_ids:

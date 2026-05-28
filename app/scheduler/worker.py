@@ -57,6 +57,35 @@ def _now_utc() -> datetime:
     return datetime.now(timezone.utc)
 
 
+async def recover_stuck_jobs(factory: async_sessionmaker[AsyncSession]) -> int:
+    """
+    Mark any jobs left in 'running' state as 'failed' with reason
+    'recovered_stale_at_startup'.
+
+    These are jobs that were claimed by a previous worker process that died
+    before marking them done/failed.  Called once at worker startup so stale
+    jobs don't block the queue indefinitely.
+
+    Returns:
+        Number of jobs recovered.
+    """
+    async with factory() as db:
+        result = await db.execute(
+            update(SchedulerJob)
+            .where(SchedulerJob.status == "running")
+            .values(
+                status="failed",
+                completed_at=_now_utc(),
+                error="recovered_stale_at_startup",
+            )
+        )
+        await db.commit()
+    count = result.rowcount
+    if count:
+        logger.warning("worker: recovered %d stale 'running' job(s) at startup", count)
+    return count
+
+
 async def _claim_next_job(
     factory: async_sessionmaker[AsyncSession],
 ) -> tuple[uuid.UUID, uuid.UUID, str, str] | None:
@@ -195,6 +224,9 @@ async def run_worker(*, stop_event: asyncio.Event | None = None) -> None:
     semaphore = asyncio.Semaphore(MAX_CONCURRENT_JOBS)
     active: set[asyncio.Task] = set()  # type: ignore[type-arg]
 
+    # Recover any jobs left 'running' by a previous crashed worker process
+    await recover_stuck_jobs(factory)
+
     logger.info("worker: started (poll_interval=%ds, max_jobs=%d)", POLL_INTERVAL_SECONDS, MAX_CONCURRENT_JOBS)
 
     try:
@@ -219,10 +251,7 @@ async def run_worker(*, stop_event: asyncio.Event | None = None) -> None:
                 continue
 
             # Queue empty (or no due jobs) — wait before next poll
-            try:
-                await asyncio.wait_for(asyncio.sleep(POLL_INTERVAL_SECONDS), timeout=POLL_INTERVAL_SECONDS + 1)
-            except asyncio.TimeoutError:
-                pass
+            await asyncio.sleep(POLL_INTERVAL_SECONDS)
 
     except asyncio.CancelledError:
         logger.info("worker: cancelled — waiting for %d active job(s)", len(active))

@@ -40,7 +40,7 @@ from app.scheduler.orchestrator import (
     enqueue_hourly_catchup,
     enqueue_overnight,
 )
-from app.scheduler.worker import execute_job
+from app.scheduler.worker import execute_job, recover_stuck_jobs
 
 
 # ── DB fixtures ────────────────────────────────────────────────────────────────
@@ -353,6 +353,30 @@ class TestEnqueueHourlyCatchup:
         jobs = (await db.execute(select(SchedulerJob))).scalars().all()
         assert len(jobs) == 2
 
+    async def test_default_at_is_current_whole_hour(self, db: AsyncSession, location: Location):
+        """
+        at=None default should schedule for the current UTC whole hour — not
+        the next hour.  This ensures cron-triggered catchups run immediately,
+        not with a 1-hour delay.
+        """
+        from unittest.mock import patch  # noqa: PLC0415
+        from datetime import timezone  # noqa: PLC0415
+
+        # Fix 'now' to 10:45:30 UTC so the expected `at` is 10:00:00 UTC.
+        frozen_now = datetime(2026, 5, 28, 10, 45, 30, tzinfo=timezone.utc)
+        with patch("app.scheduler.orchestrator._now_utc", return_value=frozen_now):
+            result = await enqueue_hourly_catchup(location.id, db)
+
+        await db.flush()
+        assert result is True
+        jobs = (await db.execute(select(SchedulerJob))).scalars().all()
+        scheduled = jobs[0].scheduled_at
+        if scheduled.tzinfo is None:
+            scheduled = scheduled.replace(tzinfo=timezone.utc)
+        assert scheduled.hour == 10
+        assert scheduled.minute == 0
+        assert scheduled.second == 0
+
 
 # ══════════════════════════════════════════════════════════════════════════════
 #  enqueue_overnight
@@ -621,6 +645,107 @@ class TestExecuteJob:
         call_kwargs = mock_sync.call_args.kwargs
         assert call_kwargs["location_id"] == location.id
         assert call_kwargs["run_type"] == "historical_backfill"
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+#  recover_stuck_jobs (worker startup sweep)
+# ══════════════════════════════════════════════════════════════════════════════
+
+
+class TestRecoverStuckJobs:
+    """Tests for the zombie-job recovery run at worker startup."""
+
+    async def test_marks_running_jobs_as_failed(
+        self, factory: async_sessionmaker[AsyncSession], location: Location
+    ):
+        """Jobs stuck at 'running' are marked 'failed' with recovery error."""
+        async with factory() as db:
+            job = SchedulerJob(
+                id=uuid.uuid4(),
+                location_id=location.id,
+                job_type="event_driven",
+                run_type="incremental",
+                scheduled_at=_utc(10),
+                status="running",
+            )
+            db.add(job)
+            await db.commit()
+            job_id = job.id
+
+        count = await recover_stuck_jobs(factory)
+        assert count == 1
+
+        async with factory() as db:
+            result = await db.execute(select(SchedulerJob).where(SchedulerJob.id == job_id))
+            fetched = result.scalar_one()
+        assert fetched.status == "failed"
+        assert fetched.error == "recovered_stale_at_startup"
+        assert fetched.completed_at is not None
+
+    async def test_does_not_touch_pending_or_done_jobs(
+        self, factory: async_sessionmaker[AsyncSession], location: Location
+    ):
+        """pending and done jobs are not affected by the recovery sweep."""
+        async with factory() as db:
+            pending_job = SchedulerJob(
+                id=uuid.uuid4(),
+                location_id=location.id,
+                job_type="hourly_catchup",
+                run_type="incremental",
+                scheduled_at=_utc(10),
+                status="pending",
+            )
+            done_job = SchedulerJob(
+                id=uuid.uuid4(),
+                location_id=location.id,
+                job_type="overnight",
+                run_type="incremental",
+                scheduled_at=_utc(3),
+                status="done",
+            )
+            db.add(pending_job)
+            db.add(done_job)
+            await db.commit()
+
+        count = await recover_stuck_jobs(factory)
+        assert count == 0
+
+        async with factory() as db:
+            jobs = (await db.execute(select(SchedulerJob))).scalars().all()
+        statuses = {j.status for j in jobs}
+        assert statuses == {"pending", "done"}
+
+    async def test_returns_zero_when_no_stuck_jobs(
+        self, factory: async_sessionmaker[AsyncSession]
+    ):
+        """Empty scheduler_jobs table → returns 0, no error."""
+        count = await recover_stuck_jobs(factory)
+        assert count == 0
+
+    async def test_recovers_multiple_stuck_jobs(
+        self, factory: async_sessionmaker[AsyncSession], location: Location
+    ):
+        """Multiple 'running' jobs are all recovered in one call."""
+        async with factory() as db:
+            for i in range(3):
+                db.add(
+                    SchedulerJob(
+                        id=uuid.uuid4(),
+                        location_id=location.id,
+                        job_type="event_driven",
+                        run_type="incremental",
+                        scheduled_at=_utc(9 + i),
+                        status="running",
+                    )
+                )
+            await db.commit()
+
+        count = await recover_stuck_jobs(factory)
+        assert count == 3
+
+        async with factory() as db:
+            jobs = (await db.execute(select(SchedulerJob))).scalars().all()
+        assert all(j.status == "failed" for j in jobs)
 
 
 # ══════════════════════════════════════════════════════════════════════════════
