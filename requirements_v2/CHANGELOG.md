@@ -325,3 +325,45 @@ Each updated doc lists location-specific open items in its "Open Questions / To 
 **Cookie storage:** `locations.eversports_cookie_cache` JSONB column on the `locations` table (encrypted at rest by Postgres). No Redis, no filesystem, no secrets-manager writeback.
 
 **No impact on M1, M1.5, M3–M8.** The cookie-export model is fully transparent to the delta engine, GHL sync, and all use-case layers.
+
+### v9 — 2026-05-29 — M6 consent layer spec consistency pass
+
+Post-M6 audit comparing the new consent layer implementation against `08_consent_model.md`, `07_foundation_layer.md`, and `00_master_overview.md`.
+
+**What M6 implemented:**
+- `app/db/models/consent_audit.py` — `ConsentAudit` SQLAlchemy model (append-only)
+- `alembic/versions/i4j5k6l7m8n9_m6_consent_audit.py` — migration creating `consent_audit` table with CHECK constraints on `channel`, `event`, `actor` and FK to `locations`
+- `app/consent/stop_detector.py` — `is_stop_keyword()` (multilingual, ASCII-fold, additive custom pattern) + `get_opt_out_confirmation()` (localised)
+- `app/consent/record.py` — append-only helpers: `record_grant`, `record_revocation`, `record_blocked_send`, `record_preference_centre_update`
+- `app/consent/gate.py` — `consent_gate()` async function: checks opted-out tag, then channel consent field; writes `blocked-send` audit row on DENY; transactional bypass
+- `app/consent/tokens.py` — HMAC-SHA256 signed preference-centre tokens, 90-day TTL
+- `app/api/v1/admin/consent.py` — REST endpoints: `POST /gate`, `POST /grant`, `POST /revoke`, `GET /preference-centre/{token}`, `PATCH /preference-centre/{token}`, `POST /sweep/{location_id}`
+- `app/api/v1/webhooks/ghl_inbound.py` — `POST /api/v1/webhooks/ghl/inbound` — GHL webhook that checks for STOP keywords, records revocation, returns `ghl_actions` list for the GHL workflow to execute
+- `app/config.py` — two new fields: `secret_key` (HMAC signing secret for preference-centre tokens) and `ghl_webhook_skip_sig_check` (boolean, skip sig check in dev/test)
+- `app/main.py` — consent router + inbound webhook router wired
+
+**Spec updated to match code (code was correct; specs were stale):**
+
+- `08_consent_model.md` § `consent_audit` table — the table had `contact_id` described as "GHL contact ID". The model has two separate columns: `ghl_contact_id` (non-nullable Text, the GHL contact ID string) and `contact_id` (nullable UUID FK to our internal `contacts` table). The `ghl_contact_id` column was not in the spec at all. Fixed: both columns now documented with correct types and nullability.
+
+- `08_consent_model.md` § `consent_audit` source enum — `record.py` accepts `"system"` as a valid source (only for `event="blocked-send"`, written by the consent gate). The spec source enum did not include `"system"`. Added with the scoping note.
+
+- `08_consent_model.md` § Consent Gate — described as "GHL workflow sub-action". The implementation is a Python API endpoint (`POST /api/v1/consent/gate`) that GHL workflows call. Spec updated to reflect this and to document the `transactional=True` bypass.
+
+- `08_consent_model.md` § Opt-out detection regex — spec used `aufhören|aufhoeren` as two separate alternations and `opt out|opt-out` as two separate terms. Code uses `aufh(?:ö|oe)ren` and `opt[\s\-]out` (more compact), plus runtime ASCII-folding via `_ascii_fold()`. Regex in spec updated to match the implementation. Added note that custom patterns are additive (DSGVO Art. 7(3) compliance).
+
+- `08_consent_model.md` § Channel normalisation — code normalises `sms → whatsapp` for consent purposes (SMS and WhatsApp share the same phone-number consent); unknown channels also default to `whatsapp`. Not previously documented. Added.
+
+- `08_consent_model.md` § DENY behaviour table — still referenced UC03 (no-show recovery), which was removed in v2. Removed UC03 row; added a note that UC05 uses `transactional=True` bypass.
+
+- `08_consent_model.md` § `consent_locale` field — marked as not yet implemented. The inbound webhook reads locale from the GHL webhook payload and falls back to `locations.consent_default_locale`. Per-contact `consent_locale` storage is deferred to M8.
+
+- `07_foundation_layer.md` § Layer 2 `consent_audit` row — column list was outdated (referenced old single `contact_id` as the GHL ID). Updated to reflect the two-column design (ghl_contact_id + nullable contact_id FK) and point to `08_consent_model.md` for full schema.
+
+- `07_foundation_layer.md` § Layer 5 stop regex — updated to match implementation (same changes as `08_consent_model.md`).
+
+**No code changes required.** All M6 code is internally consistent and implements the spec intent. Spec was stale relative to implementation details.
+
+**New config fields (connector-level, not per-location GHL settings):**
+- `SECRET_KEY` — HMAC-SHA256 signing secret for preference-centre tokens. Set in `.env`. Default `"dev-secret-change-in-production"`. Generate with `python -c "import secrets; print(secrets.token_hex(32))"`.
+- `GHL_WEBHOOK_SKIP_SIG_CHECK` — bool, default `false`. Set `true` in `.env` for dev/test to skip GHL webhook signature verification.

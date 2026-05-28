@@ -27,7 +27,7 @@
 | `consent_marketing_voice_at` | DateTime | Reserved |
 | `consent_revoked_email_at` | DateTime | Set on opt-out — set together with flipping the boolean false |
 | `consent_revoked_whatsapp_at` | DateTime | Same |
-| `consent_locale` | Text | e.g. `de-AT`, `de-DE`, `en` — drives language of consent confirmations |
+| `consent_locale` | Text | e.g. `de-AT`, `de-DE`, `en` — drives language of consent confirmations. **Not yet implemented as a stored contact field.** In M6 the inbound webhook reads locale from the GHL webhook payload (`locale` field) and falls back to `locations.consent_default_locale`. Full per-contact locale storage deferred to M8 (GHL client). |
 
 The fields above are managed by a small set of workflows; no use case writes them directly except through these workflows.
 
@@ -86,7 +86,7 @@ Every contact gets a unique preference-centre URL (signed token, 90-day expiry, 
 
 ## Consent Gate (shared workflow)
 
-Every outbound use case message routes through this gate. Implemented as a GHL workflow sub-action.
+Every outbound use case message routes through this gate. **Implemented as a Python API endpoint** (`POST /api/v1/consent/gate` in `app/api/v1/admin/consent.py`) that GHL workflows call before any outbound send. The gate receives the contact's current tags and custom fields from the caller (the GHL workflow passes them in the request body), so it does not need to call GHL itself.
 
 ```
 def consent_gate(contact, channel):
@@ -102,15 +102,18 @@ def consent_gate(contact, channel):
   return ALLOW
 ```
 
+Transactional messages (e.g. UC05 reschedule confirmations) pass `transactional=True` — the gate returns ALLOW immediately without any consent check and writes no audit row.
+
 DENY behaviour per use case:
 
 | Use case | If consent missing |
 |---|---|
 | UC01 trial follow-up | Fall back to other channel if consented; otherwise exit |
-| UC03 no-show recovery | Exit (this is email-only; no fallback) |
 | UC04 chatbot outbound | Exit (don't initiate) — outbound triggers only when channel is consented |
 | UC04 chatbot inbound | Inbound messages are customer-initiated — implied consent for that conversation. Gate ONLY outbound sends within the conversation. |
-| UC05 reschedule confirmation | This is transactional, not marketing — gate is bypassed |
+| UC05 reschedule confirmation | This is transactional, not marketing — gate is bypassed (`transactional=True` flag on the gate call) |
+
+> **UC03 was removed in v2 (2026-05-24).** No-show recovery is handled by Eversports' native comms.
 
 ---
 
@@ -119,8 +122,10 @@ DENY behaviour per use case:
 A shared GHL workflow listens for inbound messages from any contact on any channel matching the configured `stop_keywords` regex. Default:
 
 ```
-^(stop|stopp|aufhören|aufhoeren|abmelden|keine werbung|unsubscribe|opt out|opt-out)$/i
+^(stop|stopp|aufh(?:ö|oe)ren|abmelden|keine\s+werbung|unsubscribe|opt[\s\-]out)$  (re.IGNORECASE)
 ```
+
+The implementation also applies Unicode-to-ASCII folding (ö→oe, ü→ue, ß→ss etc.) so that `AUFHOEREN` matches even without the umlaut. Custom per-location patterns (from `locations.stop_keywords`) are **additive** — they extend the default set rather than replacing it, which is required by DSGVO Art. 7(3) (withdrawal must be as easy as granting).
 
 On match:
 
@@ -134,6 +139,8 @@ send confirmation in customer's locale:
   DE: "Sie wurden abgemeldet. Einen schönen Tag noch, [first_name]."
 write row to consent_audit
 ```
+
+**Channel normalisation:** GHL may send `channel = "sms"` for SMS messages. The inbound webhook handler normalises `sms → whatsapp` for consent purposes (SMS and WhatsApp share the same phone-number consent channel). Unknown channel values also default to `whatsapp`. The canonical channels for consent are: `email`, `whatsapp`, `voice`.
 
 The `opted-out` tag is global (applies to all channels for that contact). To reverse, the customer can use the preference centre URL or contact the studio directly.
 
@@ -149,17 +156,18 @@ Append-only, write-protected (no UPDATE / DELETE in normal operation). Used for 
 
 | Column | Notes |
 |---|---|
-| `id` | uuid |
-| `contact_id` | GHL contact ID |
-| `location_id` | FK |
+| `id` | uuid (PK) |
+| `ghl_contact_id` | GHL contact ID string — non-nullable; indexed. Present even when our internal `contacts` row does not yet exist (e.g. STOP keyword from an unknown number). |
+| `contact_id` | Optional FK to our internal `contacts` table (UUID). Nullable — populated when the contact has already been scraped and a `contacts` row exists. |
+| `location_id` | FK to `locations.id` — non-nullable |
 | `channel` | email / whatsapp / voice |
 | `event` | granted / revoked / blocked-send / preference-centre-update |
-| `value` | new boolean value (where applicable) |
-| `source` | onboarding-form / double-opt-in / studio-import / preference-centre / whatsapp-opt-in / stop-keyword / unsubscribe-link |
-| `ts` | datetime |
+| `value` | new boolean value (True for grant, False for revoke; null for blocked-send) |
+| `source` | onboarding-form / double-opt-in / studio-import / preference-centre / whatsapp-opt-in / stop-keyword / unsubscribe-link / system (system is only valid for event=blocked-send, written by the consent gate) |
+| `ts` | datetime with timezone; server default `now()` |
 | `actor` | system / customer / studio-staff |
-| `message_shown` | The exact consent copy presented (snapshot, for audit) |
-| `ip` | Inbound IP if HTTP-sourced (null otherwise) |
+| `message_shown` | The exact consent copy presented (snapshot, for audit); null for blocked-send events |
+| `ip` | Inbound IP if HTTP-sourced (preference-centre, opt-in form); null otherwise |
 
 Retention: 6 years (DSGVO Art. 17 carve-out for legal claims & accountability).
 

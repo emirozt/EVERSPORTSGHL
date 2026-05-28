@@ -48,6 +48,14 @@ class Settings(BaseSettings):
     # Server
     port: int = 8080
 
+    # ── M6 Consent layer ─────────────────────────────────────────────────────
+    # Signing secret for preference-centre tokens (HMAC-SHA256).
+    # Generate with: python -c "import secrets; print(secrets.token_hex(32))"
+    secret_key: str = "dev-secret-change-in-production"
+
+    # Skip GHL webhook signature verification in test/dev mode.
+    ghl_webhook_skip_sig_check: bool = False
+
     # ── M5 Writeback safety ───────────────────────────────────────────────────
     # Controls the dev-mode safety guard on writeback handlers.
     # "dev"  — hard whitelist: only emiroztrk@gmail.com + Reformer Booty Burn slot

@@ -195,7 +195,7 @@ Reusable sub-workflow called by use cases that perform sensitive actions. **Iden
 | `pipeline_membership_stage` | Text | Current stage in membership pipeline |
 | **Consent fields (new — see `08_consent_model.md`)** | | |
 | `consent_marketing_email` | Boolean | True iff customer opted in to marketing email |
-| `consent_marketing_email_source` | Text | "onboarding-form" / "double-opt-in" / "studio-import" / "preference-centre" |
+| `consent_marketing_email_source` | Text | "onboarding-form" / "double-opt-in" / "studio-import" / "preference-centre" / "whatsapp-opt-in" |
 | `consent_marketing_email_at` | DateTime | When consent was captured |
 | `consent_marketing_whatsapp` | Boolean | True iff customer opted in to WhatsApp marketing |
 | `consent_marketing_whatsapp_source` | Text | Same source enum |
@@ -326,7 +326,7 @@ Set once per location on onboarding. Stored as GHL custom values at sub-account 
 | `card_upsell_min_sessions_per_week` | Threshold for the Card → Membership ready upsell trigger. Fires when a card customer's `sessions_per_week_last_month` exceeds this value. | `2` |
 | `gatekeeper_enabled` | Master switch. If false, all inbound messages route through the legacy direct-to-use-case path. | `true` |
 | `gatekeeper_confidence_threshold` | Minimum classifier confidence (0.0–1.0) before auto-action. Below this, the message is escalated to the owner regardless of category. | `0.7` |
-| `gatekeeper_noise_action` | Per-noise-category JSON policy. Each noise category (`acknowledgment`, `emoji_reaction`, `social_compliment`, `off_topic`, `spam`) maps to either `silent_ignore`, `react_emoji`, or `auto_reply_template`. | see `08_consent_model.md` defaults |
+| `gatekeeper_noise_action` | Per-noise-category JSON policy. Each noise category (`acknowledgment`, `emoji_reaction`, `social_compliment`, `off_topic`, `spam`) maps to either `silent_ignore`, `react_emoji`, or `auto_reply_template`. | see `07_foundation_layer.md` § Layer 6 "Noise policies" for defaults |
 | `gatekeeper_owner_alert_categories` | Comma list of categories that auto-page the owner. Default: `complaint, injury_medical, billing_dispute, low_confidence`. | `complaint,injury_medical,billing_dispute,low_confidence` |
 | `stop_keywords` | Per-locale opt-out keyword regex | `^(stop|stopp|aufhören|abmelden|keine werbung)$/i` |
 | `whatsapp_templates_namespace` | WhatsApp Business template namespace for this location | `wa_template_ns_xxx` |

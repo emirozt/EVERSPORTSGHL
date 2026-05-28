@@ -8,10 +8,12 @@ from fastapi import FastAPI
 
 from app.api.health import router as health_router
 from app.api.v1.admin.bootstrap import router as bootstrap_router
+from app.api.v1.admin.consent import router as consent_router
 from app.api.v1.admin.ghl_oauth import router as ghl_oauth_router
 from app.api.v1.admin.scheduler import router as scheduler_router
 from app.api.v1.admin.sync import router as sync_router
 from app.api.v1.admin.writeback import router as writeback_router
+from app.api.v1.webhooks.ghl_inbound import router as ghl_inbound_router
 from app.config import get_settings
 from app.db.session import get_engine
 from app.scheduler.cron import start_scheduler, stop_scheduler
@@ -82,6 +84,9 @@ def create_app() -> FastAPI:
     app.include_router(ghl_oauth_router, prefix="/api/v1/admin")
     app.include_router(scheduler_router, prefix="/api/v1/admin")
     app.include_router(writeback_router, prefix="/api/v1/admin")
+    # ── M6: consent layer + inbound webhook ──────────────────────────────────
+    app.include_router(consent_router)       # prefix already on router: /api/v1/consent
+    app.include_router(ghl_inbound_router)   # prefix already on router: /api/v1/webhooks/ghl
     return app
 
 

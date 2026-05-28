@@ -415,7 +415,7 @@ Plus 03:00 overnight full reconciliation.
 | `sessions` | Activity schedule from admin activities export · session_id, activity, datetime, total_spots, registered_count, derived available_spots |
 | `writeback_jobs` | Pending / in-flight / completed writeback actions · idempotency_key, status, retries, error |
 | `ai_usage` | One row per AI call · location_id, use_case, contact_id, model, prompt_tokens, completion_tokens, cost_usd, ts |
-| `consent_audit` | Append-only log of consent changes · contact_id, channel, value, source, ts, ip, message_shown |
+| `consent_audit` | Append-only log of consent changes · ghl_contact_id (non-nullable GHL ID), contact_id (nullable FK to contacts), location_id, channel, event, value, source, actor, ts, message_shown, ip — see `08_consent_model.md` for full schema |
 | `gatekeeper_log` | Append-only log of every inbound-message classification + routing decision · contact_id, channel, raw_text, classification, confidence, route_to, action_taken, owner_override, ts |
 | `sync_log` | One row per sync run · run_type, contacts_processed, contacts_updated, tags_applied, pipeline_moves, errors, duration |
 
@@ -627,8 +627,10 @@ See `08_consent_model.md` for full consent capture and opt-out flow.
 A shared workflow listens for inbound messages matching the per-location `stop_keywords` regex. Default:
 
 ```
-^(stop|stopp|aufhören|aufhoeren|abmelden|keine werbung|unsubscribe|opt out|opt-out)$
+^(stop|stopp|aufh(?:ö|oe)ren|abmelden|keine\s+werbung|unsubscribe|opt[\s\-]out)$  (re.IGNORECASE)
 ```
+
+The implementation additionally ASCII-folds the message (ö→oe etc.) before matching, so `AUFHOEREN` matches the umlaut form. Custom per-location patterns (from `locations.stop_keywords`) are **additive** — they extend the default set (see `app/consent/stop_detector.py`). The match is full-message-anchored — a STOP keyword embedded in a sentence does not trigger the opt-out.
 
 Match → flip the relevant channel consent boolean false, stamp `consent_revoked_<channel>_at`, apply `opted-out` tag, send confirmation in the customer's language, exit all active automations for that contact.
 
