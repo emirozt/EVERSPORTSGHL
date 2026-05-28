@@ -307,7 +307,21 @@ async def execute_writeback_job(
 
         # Record audit + send notification (live mode only)
         if not effective_dry_run:
-            customer_email = payload.get("email") or payload.get("customer_email", "")
+            # Resolve customer email from whichever field the job type uses:
+            #   create_customer         → payload["email"]
+            #   create/cancel_booking   → payload["customer_email"]  (if present)
+            #   reschedule_booking      → payload["customer_email"]
+            # create_booking has no email field in the spec — fall back to
+            # "customer_id:<id>" so the audit entry is never blank.
+            customer_email = (
+                payload.get("email")
+                or payload.get("customer_email")
+                or (
+                    f"customer_id:{payload['customer_id']}"
+                    if "customer_id" in payload
+                    else ""
+                )
+            )
             class_name = payload.get("class_name") or payload.get("new_class_name")
             start_dt_str = payload.get("session_datetime") or payload.get("new_session_datetime")
             start_dt = None
