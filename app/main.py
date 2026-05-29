@@ -9,6 +9,7 @@ from fastapi import FastAPI
 from app.api.health import router as health_router
 from app.api.v1.admin.bootstrap import router as bootstrap_router
 from app.api.v1.admin.consent import router as consent_router
+from app.api.v1.admin.gatekeeper import router as gatekeeper_admin_router
 from app.api.v1.admin.ghl_oauth import router as ghl_oauth_router
 from app.api.v1.admin.scheduler import router as scheduler_router
 from app.api.v1.admin.sync import router as sync_router
@@ -85,8 +86,10 @@ def create_app() -> FastAPI:
     app.include_router(scheduler_router, prefix="/api/v1/admin")
     app.include_router(writeback_router, prefix="/api/v1/admin")
     # ── M6: consent layer + inbound webhook ──────────────────────────────────
-    app.include_router(consent_router)       # prefix already on router: /api/v1/consent
-    app.include_router(ghl_inbound_router)   # prefix already on router: /api/v1/webhooks/ghl
+    app.include_router(consent_router)          # prefix already on router: /api/v1/consent
+    app.include_router(ghl_inbound_router)      # prefix already on router: /api/v1/webhooks/ghl
+    # ── M6b: gatekeeper admin ─────────────────────────────────────────────────
+    app.include_router(gatekeeper_admin_router) # prefix: /api/v1/admin/gatekeeper
     return app
 
 

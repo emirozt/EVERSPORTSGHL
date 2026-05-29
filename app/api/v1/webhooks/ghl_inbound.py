@@ -1,5 +1,5 @@
 """
-GHL inbound webhook handler (M6 — consent / STOP detection).
+GHL inbound webhook handler (M6 / M6b).
 
 GHL workflows POST every inbound customer message to this endpoint.
 The handler:
@@ -13,8 +13,10 @@ The handler:
             - Apply "opted-out" tag
             - Remove contact from all active automation sequences
             - Send localised opt-out confirmation message
-  4. If NOT STOP: returns {"is_stop": false} so the GHL workflow routes
-     the message onward to the gatekeeper (M6b).
+  4. If NOT STOP:
+       a. If gatekeeper enabled: runs Claude Haiku classification (M6b).
+       b. Returns classification + routing + noise-policy actions.
+       c. If gatekeeper disabled: returns legacy route (GHL workflow sends to UC04).
 
 Signature validation:
   GHL signs the POST body with HMAC-SHA256 using the location's
@@ -29,14 +31,18 @@ Payload shape (from GHL):
     "contactId": "<ghl_contact_id>",
     "channel": "whatsapp" | "email" | "sms",
     "messageBody": "<raw text>",
-    "firstName": "<first_name>",   // optional
-    "locale": "de-AT"              // optional, from contact custom field
+    "firstName": "<first_name>",       // optional
+    "locale": "de-AT",                 // optional, from contact custom field
+    "surface": "<surface context>",    // optional, e.g. "post_abc123"
+    "messageId": "<ghl_message_id>"    // optional
   }
 
 References:
   - requirements_v2/08_consent_model.md § "Opt-out detection"
+  - requirements_v2/07_foundation_layer.md § "Layer 6 — Gatekeeper"
   - app/consent/stop_detector.py
   - app/consent/record.py
+  - app/gatekeeper/gate.py
 """
 
 from __future__ import annotations
@@ -56,6 +62,7 @@ from app.consent.record import record_revocation
 from app.consent.stop_detector import get_opt_out_confirmation, is_stop_keyword
 from app.db.models.location import Location
 from app.db.session import get_db
+from app.gatekeeper.gate import process_inbound
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/v1/webhooks/ghl", tags=["webhooks"])
@@ -108,14 +115,26 @@ class GHLInboundMessage(BaseModel):
     channel: str  # "whatsapp" | "email" | "sms" (we normalise sms → whatsapp)
     messageBody: str
     firstName: str | None = None
-    locale: str | None = None  # e.g. "de-AT"; falls back to location default
+    locale: str | None = None       # e.g. "de-AT"; falls back to location default
+    surface: str | None = None      # e.g. "post_abc123" for Instagram comments
+    messageId: str | None = None    # GHL message ID for dedup
+
+
+class GatekeeperResult(BaseModel):
+    """Gatekeeper classification info (present only if gatekeeper ran)."""
+    classification: str
+    confidence: float
+    route_to: str
+    action_taken: str
+    log_id: uuid.UUID | None
 
 
 class InboundHandlerResponse(BaseModel):
     is_stop: bool
     channel: str
     confirmation_message: str | None = None
-    ghl_actions: list[dict[str, Any]]  # instructions for GHL workflow
+    ghl_actions: list[dict[str, Any]]
+    gatekeeper: GatekeeperResult | None = None
 
 
 # ── Channel normalisation ─────────────────────────────────────────────────────
@@ -124,10 +143,14 @@ class InboundHandlerResponse(BaseModel):
 def _normalise_channel(raw: str) -> str:
     """Map GHL channel names to our canonical set."""
     mapping = {
-        "whatsapp":  "whatsapp",
-        "sms":       "whatsapp",  # treat SMS as whatsapp for consent purposes
-        "email":     "email",
-        "voice":     "voice",
+        "whatsapp":           "whatsapp",
+        "sms":                "whatsapp",  # treat SMS as whatsapp for consent purposes
+        "email":              "email",
+        "voice":              "voice",
+        "instagram_dm":       "instagram_dm",
+        "instagram_comment":  "instagram_comment",
+        "facebook_dm":        "facebook_dm",
+        "facebook_comment":   "facebook_comment",
     }
     return mapping.get(raw.lower(), "whatsapp")
 
@@ -143,17 +166,20 @@ async def handle_inbound_message(
     x_ghl_signature: str | None = Header(default=None, alias="X-GHL-Signature"),
 ) -> InboundHandlerResponse:
     """
-    Receive an inbound message from GHL and check for STOP keywords.
+    Receive an inbound message from GHL.
 
-    The GHL workflow should:
-    1. POST here immediately on any inbound message.
-    2. If `is_stop: true` — execute the `ghl_actions` list to flip consent
-       fields, apply opted-out tag, remove from sequences, and send the
-       `confirmation_message`.
-    3. If `is_stop: false` — route the message onward (to gatekeeper in M6b,
-       or directly to the relevant use case if gatekeeper is disabled).
+    GHL workflow flow:
+    1. POST here on any inbound message.
+    2. If ``is_stop: true`` — execute ``ghl_actions`` to flip consent fields,
+       apply opted-out tag, remove from sequences, send ``confirmation_message``.
+    3. If ``is_stop: false`` and gatekeeper ran:
+       - Check ``gatekeeper.route_to``:
+         - "uc04" / "uc05" → hand off to the appropriate sub-workflow
+         - "owner"         → page the owner via GHL notification workflow
+         - "noise"         → execute ``ghl_actions`` (react/reply/silent)
+         - "legacy"        → route direct to UC04 (gatekeeper disabled)
     """
-    # Look up location by GHL location ID
+    # ── Look up location ──────────────────────────────────────────────────────
     result = await db.execute(
         select(Location).where(Location.ghl_subaccount_id == payload.locationId)
     )
@@ -164,31 +190,94 @@ async def handle_inbound_message(
             detail=f"No location found for ghl_location_id={payload.locationId!r}",
         )
 
-    # Validate signature
+    # ── Validate signature ────────────────────────────────────────────────────
     raw_body = await request.body()
     await _verify_ghl_signature(raw_body, x_ghl_signature, location)
 
     channel = _normalise_channel(payload.channel)
+    locale = payload.locale or location.consent_default_locale
 
-    # ── STOP detection ────────────────────────────────────────────────────────
+    # ── STOP detection (runs before gatekeeper) ───────────────────────────────
     stop_detected = is_stop_keyword(
         payload.messageBody,
         custom_pattern=location.stop_keywords or None,
     )
 
-    if not stop_detected:
-        logger.debug(
-            "ghl_inbound: not a stop keyword ghl_contact=%s channel=%s",
+    if stop_detected:
+        return await _handle_stop(
+            db=db,
+            payload=payload,
+            location=location,
+            channel=channel,
+            locale=locale,
+        )
+
+    # ── Gatekeeper (M6b) ──────────────────────────────────────────────────────
+    logger.debug(
+        "ghl_inbound: routing to gatekeeper ghl_contact=%s channel=%s",
+        payload.contactId,
+        channel,
+    )
+
+    decision = await process_inbound(
+        db,
+        location=location,
+        ghl_contact_id=payload.contactId,
+        message=payload.messageBody,
+        channel=channel,
+        locale=locale,
+        inbound_surface=payload.surface,
+        ghl_message_id=payload.messageId,
+        contact_first_name=payload.firstName,
+    )
+    await db.commit()
+
+    # ── Consent-gate escalation from classifier ───────────────────────────────
+    # If Haiku classified the message as opt_out (a near-STOP phrase that the
+    # STOP regex didn't anchor-match), the router returns route_to="consent_gate".
+    # We call the same STOP handler so consent revocation is recorded and GHL
+    # workflow actions are returned — legally equivalent to a STOP keyword match.
+    if decision.route_to == "consent_gate":
+        logger.info(
+            "ghl_inbound: gatekeeper escalated opt_out to consent_gate "
+            "ghl_contact=%s channel=%s",
             payload.contactId,
             channel,
         )
-        return InboundHandlerResponse(
-            is_stop=False,
+        return await _handle_stop(
+            db=db,
+            payload=payload,
+            location=location,
             channel=channel,
-            ghl_actions=[],
+            locale=locale,
         )
 
-    # ── STOP flow ─────────────────────────────────────────────────────────────
+    return InboundHandlerResponse(
+        is_stop=False,
+        channel=channel,
+        ghl_actions=decision.ghl_actions,
+        gatekeeper=GatekeeperResult(
+            classification=decision.classification,
+            confidence=decision.confidence,
+            route_to=decision.route_to,
+            action_taken=decision.action_taken,
+            log_id=decision.log_id,
+        ),
+    )
+
+
+# ── STOP flow ─────────────────────────────────────────────────────────────────
+
+
+async def _handle_stop(
+    *,
+    db: AsyncSession,
+    payload: GHLInboundMessage,
+    location: Location,
+    channel: str,
+    locale: str,
+) -> InboundHandlerResponse:
+    """Handle a confirmed STOP keyword message."""
     logger.info(
         "ghl_inbound: STOP keyword detected ghl_contact=%s channel=%s location=%s",
         payload.contactId,
@@ -196,7 +285,6 @@ async def handle_inbound_message(
         location.id,
     )
 
-    # Record revocation in consent_audit
     await record_revocation(
         db,
         ghl_contact_id=payload.contactId,
@@ -208,12 +296,9 @@ async def handle_inbound_message(
     )
     await db.commit()
 
-    # Localised confirmation message
-    locale = payload.locale or location.consent_default_locale
     first_name = payload.firstName or ""
     confirmation = get_opt_out_confirmation(first_name, locale)
 
-    # Return GHL action instructions (the workflow executes these)
     ghl_actions: list[dict[str, Any]] = [
         {
             "action": "update_contact_field",
@@ -223,7 +308,7 @@ async def handle_inbound_message(
         {
             "action": "update_contact_field",
             "field": f"consent_revoked_{channel}_at",
-            "value": "__now__",  # GHL workflow resolves this to current timestamp
+            "value": "__now__",
         },
         {
             "action": "apply_tag",
@@ -233,9 +318,15 @@ async def handle_inbound_message(
             "action": "remove_from_all_sequences",
         },
         {
+            # TRANSACTIONAL BYPASS — this send is an acknowledgment to a customer-
+            # initiated opt-out, NOT a marketing communication.  It explicitly
+            # bypasses the consent gate per spec (08_consent_model.md § "Opt-out
+            # detection") and DSGVO Art. 7(3) (withdrawal must be as easy as consent).
+            # Do not add a consent gate check here.
             "action": "send_message",
             "channel": channel,
             "body": confirmation,
+            "bypass_reason": "opt_out_confirmation_transactional",
         },
     ]
 
@@ -244,4 +335,5 @@ async def handle_inbound_message(
         channel=channel,
         confirmation_message=confirmation,
         ghl_actions=ghl_actions,
+        gatekeeper=None,
     )

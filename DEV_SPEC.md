@@ -427,40 +427,45 @@ CREATE TABLE writeback_jobs (
 CREATE INDEX idx_writeback_status ON writeback_jobs(status, location_id);
 
 -- ai_usage: every AI call
+-- NOTE: M6b baseline (app/db/models/ai_usage.py + alembic/versions/j5k6l7m8n9o0).
 CREATE TABLE ai_usage (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   location_id UUID NOT NULL REFERENCES locations(id),
-  contact_id UUID REFERENCES contacts(id),
-  use_case TEXT NOT NULL,                         -- UC01..UC05
-  step TEXT NOT NULL,                             -- intent_detection | message_generation | reply_handling | summary
+  ghl_contact_id TEXT,                            -- nullable; GHL contact ID string (no FK — may not be synced yet)
+  use_case TEXT NOT NULL,                         -- gatekeeper | UC01 | UC02 | UC03 | UC04 | UC05
+  step TEXT NOT NULL,                             -- classification | intent_detection | message_generation | reply_handling | summary
   model TEXT NOT NULL,
   prompt_tokens INT NOT NULL,
   completion_tokens INT NOT NULL,
-  cost_usd NUMERIC NOT NULL,
+  cost_usd NUMERIC(12,6) NOT NULL,
   ts TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
-CREATE INDEX idx_ai_usage_billing ON ai_usage(location_id, ts);
+CREATE INDEX idx_ai_usage_location_ts ON ai_usage(location_id, ts);
+CREATE INDEX idx_ai_usage_use_case_ts ON ai_usage(use_case, ts);
 
 -- gatekeeper_log: append-only log of inbound classification + routing
+-- NOTE: M6b baseline (app/db/models/gatekeeper_log.py + alembic/versions/j5k6l7m8n9o0).
 CREATE TABLE gatekeeper_log (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   location_id UUID NOT NULL REFERENCES locations(id),
-  contact_id UUID REFERENCES contacts(id),                  -- nullable for first-contact prospects
-  inbound_channel TEXT NOT NULL,                            -- whatsapp_dm | email | instagram_dm | instagram_comment | facebook_dm | facebook_comment
+  ghl_contact_id TEXT,                                      -- GHL contact ID string; nullable (contact may not yet be matched)
+  contact_id UUID,                                          -- nullable FK to contacts.id; no FK constraint (contact may not yet exist)
+  inbound_channel TEXT NOT NULL,                            -- whatsapp | email | instagram_dm | instagram_comment | facebook_dm | facebook_comment
   inbound_surface TEXT,                                     -- e.g. instagram post ID for comments
-  ghl_message_id TEXT NOT NULL,
+  ghl_message_id TEXT,                                      -- nullable; not always provided by GHL payload
   raw_text TEXT NOT NULL,
   classification TEXT NOT NULL,                             -- inquiry_pricing | inquiry_class_info | inquiry_membership | booking | trial_reply | complaint | injury_medical | billing_dispute | opt_out | acknowledgment | emoji_reaction | social_compliment | off_topic | spam | low_confidence
-  confidence NUMERIC NOT NULL,                              -- 0.0–1.0
-  route_to TEXT NOT NULL,                                   -- uc04 | uc05 | owner | consent_gate | auto_reply | silent_ignore
-  action_taken TEXT NOT NULL,
-  owner_override TEXT,                                      -- if reclassified
+  confidence NUMERIC(4,3) NOT NULL,                         -- 0.000–1.000
+  route_to TEXT NOT NULL,                                   -- uc04 | uc05 | owner | noise | consent_gate | legacy
+  action_taken TEXT NOT NULL,                               -- dynamic; examples: silent_ignore | react_emoji | auto_reply_template | routed_<category> | escalated_<category> | consent_gate_opt_out | legacy_uc04 (no DB CHECK constraint — values set by router.py)
+  owner_override TEXT,                                      -- if reclassified by owner
   override_ts TIMESTAMPTZ,
   ts TIMESTAMPTZ NOT NULL DEFAULT now()
 );
-CREATE INDEX idx_gk_recent ON gatekeeper_log(location_id, ts DESC);
-CREATE INDEX idx_gk_contact ON gatekeeper_log(contact_id);
+CREATE INDEX idx_gatekeeper_log_location_ts ON gatekeeper_log(location_id, ts);
+CREATE INDEX idx_gatekeeper_log_contact_id ON gatekeeper_log(contact_id);
+CREATE INDEX idx_gatekeeper_log_classification ON gatekeeper_log(classification, ts);
 
 -- consent_audit: append-only
 CREATE TABLE consent_audit (
@@ -673,14 +678,17 @@ PYTHONUNBUFFERED=1
 - Before milestone close: `consent-gate-auditor` — full audit pass. This is the milestone the auditor was built for; it MUST sign off before merge.
 - Plus: `spec-consistency-checker` — verify the consent fields in code match `08_consent_model.md` § "Per-channel consent fields"
 
-### M6b — Gatekeeper (1 week, runs alongside M7)
-- New Postgres table `gatekeeper_log` + indexes
-- New `app/gatekeeper/` module: classifier (Haiku), router, noise-policy handlers, owner-override mechanics
-- Per-location config respected: `gatekeeper_enabled`, `confidence_threshold`, `noise_action`, `owner_alert_categories`
+### M6b — Gatekeeper (1 week, runs alongside M7) ✓ COMPLETE (2026-05-29)
+- New Postgres table `gatekeeper_log` + 3 indexes (migration `j5k6l7m8n9o0`)
+- New Postgres table `ai_usage` + 2 indexes (same migration — first writer is the gatekeeper; M7 adds more writers)
+- New `app/gatekeeper/` module: `classifier.py` (Haiku, 15-category), `router.py`, `noise_policy.py`, `gate.py`, `audit.py`
+- `app/api/v1/admin/gatekeeper.py`: `PATCH /log/{log_id}/override` + `GET /log` endpoints
+- `app/api/v1/webhooks/ghl_inbound.py` updated: STOP detection first, then gatekeeper; `consent_gate` route_to re-uses `_handle_stop()` path
+- `app/main.py` updated: `gatekeeper_admin_router` wired
+- Per-location config respected: `gatekeeper_enabled`, `gatekeeper_confidence_threshold`, `gatekeeper_noise_action`, `gatekeeper_owner_alert_categories`
 - Multilingual STOP detection runs BEFORE the classifier (consistency with consent gate)
-- Inbound webhook from GHL routes through the gatekeeper before reaching any use case workflow
-- Owner-override API: reclassify a message, mark a sender VIP, add content-pattern rules
 - Channel scope expansion: Instagram DMs + comments + Facebook DMs + comments now in v1 inbound
+- Owner-override API: reclassify a message (`owner_override` + `override_ts` columns); VIP rules and content-pattern rules deferred to v2
 **Acceptance:** in the test location, 30 sample messages across all 6 channels classify correctly, route to the right destination, and write `gatekeeper_log` rows. Noise messages don't reach UC04/UC05. Owner override changes the routing for the affected message.
 
 **Recommended agent invocations:**

@@ -416,7 +416,7 @@ Plus 03:00 overnight full reconciliation.
 | `writeback_jobs` | Pending / in-flight / completed writeback actions · idempotency_key, status, retries, error |
 | `ai_usage` | One row per AI call · location_id, use_case, contact_id, model, prompt_tokens, completion_tokens, cost_usd, ts |
 | `consent_audit` | Append-only log of consent changes · ghl_contact_id (non-nullable GHL ID), contact_id (nullable FK to contacts), location_id, channel, event, value, source, actor, ts, message_shown, ip — see `08_consent_model.md` for full schema |
-| `gatekeeper_log` | Append-only log of every inbound-message classification + routing decision · contact_id, channel, raw_text, classification, confidence, route_to, action_taken, owner_override, ts |
+| `gatekeeper_log` | Append-only log of every inbound-message classification + routing decision · ghl_contact_id (nullable TEXT), contact_id (nullable UUID — no FK constraint), inbound_channel, inbound_surface, ghl_message_id (nullable), raw_text, classification, confidence, route_to, action_taken, owner_override, override_ts, ts — see `app/db/models/gatekeeper_log.py` for full schema |
 | `sync_log` | One row per sync run · run_type, contacts_processed, contacts_updated, tags_applied, pipeline_moves, errors, duration |
 
 ### Delta engine
@@ -691,14 +691,18 @@ def gatekeeper(message, contact, channel, location):
     if result.confidence < location.gatekeeper_confidence_threshold:
         return escalate_to_owner(message, contact, reason="low_confidence")
 
-    # Category-driven routing
-    if result.category in ("inquiry_pricing", "inquiry_class_info", "inquiry_membership", "trial_reply"):
+    # Category-driven routing (in priority order)
+    if result.category == "opt_out":
+        # Near-STOP phrase not caught by the regex anchor — legally equivalent to STOP.
+        # Route to consent gate (same path as the STOP regex branch above).
+        return route_to_consent_gate(message, contact, channel)
+    elif result.category in ("inquiry_pricing", "inquiry_class_info", "inquiry_membership", "trial_reply"):
         return route_to_uc04(message, contact, gatekeeper_classification=result)
     elif result.category == "booking":
         return route_to_uc05(message, contact, gatekeeper_classification=result)
     elif result.category in location.gatekeeper_owner_alert_categories:
         return escalate_to_owner(message, contact, reason=result.category)
-    elif result.category.startswith("noise_") or result.category in ("acknowledgment", "emoji_reaction", "social_compliment", "off_topic", "spam"):
+    elif result.category in ("acknowledgment", "emoji_reaction", "social_compliment", "off_topic", "spam"):
         policy = location.gatekeeper_noise_action.get(result.category, "silent_ignore")
         return execute_noise_policy(message, contact, channel, policy)
     else:
@@ -760,20 +764,22 @@ Every AI call writes a row to `ai_usage`:
 | Column | Notes |
 |---|---|
 | `id` | uuid |
-| `location_id` | FK |
-| `contact_id` | GHL contact ID |
-| `use_case` | UC01 / UC02 / UC03 / UC04 / UC05 |
-| `step` | "intent_detection" / "message_generation" / "reply_handling" / "summary" |
-| `model` | e.g. "claude-sonnet-4-6" |
+| `location_id` | FK to `locations` (not nullable) |
+| `ghl_contact_id` | GHL contact ID string (nullable TEXT — absent for location-level calls e.g. batch) |
+| `use_case` | `gatekeeper` / `UC01` / `UC02` / `UC04` / `UC05` |
+| `step` | `"classification"` / `"intent_detection"` / `"message_generation"` / `"reply_handling"` / `"summary"` |
+| `model` | e.g. `"claude-haiku-4-5"`, `"claude-sonnet-4-6"` |
 | `prompt_tokens` | int |
 | `completion_tokens` | int |
-| `cost_usd` | computed from model price card |
+| `cost_usd` | computed from model price card at write time; `NUMERIC(12,6)` |
 | `ts` | datetime |
+
+Note: the column was named `contact_id` in the original spec; the implementation uses `ghl_contact_id` (TEXT, nullable) to distinguish it from the internal UUID FK. There is no internal `contact_id` FK on this table — the GHL contact ID string is the only contact reference here.
 
 Billing roll-up: monthly per location → invoice line item.
 
 Soft cap: when `ai_monthly_spend > 0.8 × ai_monthly_budget`, owner warning email.
-Hard cap: when `ai_monthly_spend ≥ ai_monthly_budget`, suspend non-essential AI calls (UC03 falls back to a fixed-template email; UC04 outbound suppressed; UC04 inbound stays live to avoid breaking customer support).
+Hard cap: when `ai_monthly_spend ≥ ai_monthly_budget`, suspend non-essential AI calls (UC04 outbound suppressed; UC04 inbound stays live to avoid breaking customer support).
 
 ---
 

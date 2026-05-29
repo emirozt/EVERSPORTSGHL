@@ -326,6 +326,48 @@ Each updated doc lists location-specific open items in its "Open Questions / To 
 
 **No impact on M1, M1.5, M3–M8.** The cookie-export model is fully transparent to the delta engine, GHL sync, and all use-case layers.
 
+### v10 — 2026-05-29 — M6b Gatekeeper spec consistency pass
+
+Post-M6b audit comparing the gatekeeper implementation against `07_foundation_layer.md`, `00_master_overview.md`, and `DEV_SPEC.md`.
+
+**What M6b implemented:**
+- `app/db/models/gatekeeper_log.py` — `GatekeeperLog` SQLAlchemy model (append-only except owner_override / override_ts)
+- `app/db/models/ai_usage.py` — `AiUsage` SQLAlchemy model (append-only)
+- `alembic/versions/j5k6l7m8n9o0_m6b_gatekeeper_log.py` — migration creating both tables with CHECK constraints and three indexes on `gatekeeper_log`, two on `ai_usage`
+- `app/gatekeeper/classifier.py` — 15-category Claude Haiku classifier with `ClassificationResult` dataclass, cost estimate, and `build_contact_snippet()` helper
+- `app/gatekeeper/router.py` — routing logic: confidence floor → opt_out → inquiry → booking → owner-alert → noise → fallback
+- `app/gatekeeper/noise_policy.py` — `execute_noise_policy()` for `silent_ignore`, `react_emoji`, `auto_reply_template`
+- `app/gatekeeper/gate.py` — `process_inbound()` orchestrator: disabled-check → classify → route → audit-log (no commit)
+- `app/gatekeeper/audit.py` — `log_classification()`, `log_ai_usage()`, `apply_owner_override()`
+- `app/api/v1/admin/gatekeeper.py` — `PATCH /log/{log_id}/override` and `GET /log` endpoints
+- `app/api/v1/webhooks/ghl_inbound.py` — updated: STOP detection first, then gatekeeper; `consent_gate` route_to handled by re-calling `_handle_stop()`
+- `app/main.py` — wired `gatekeeper_admin_router`
+
+**Spec updated to match code (code was correct; specs were stale):**
+
+- `DEV_SPEC.md` § `gatekeeper_log` DDL — four corrections:
+  1. Added `ghl_contact_id TEXT` column (was absent from spec DDL; present in model and migration).
+  2. `ghl_message_id` changed from `NOT NULL` to nullable (model: `nullable=True`; migration: `nullable=True`; some GHL payloads omit the message ID).
+  3. `route_to` comment updated: was `uc04 | uc05 | owner | consent_gate | auto_reply | silent_ignore`; correct values are `uc04 | uc05 | owner | noise | consent_gate | legacy` (matches model docstring and migration CHECK constraint).
+  4. Index names and count corrected: was `idx_gk_recent` + `idx_gk_contact` (2 indexes); correct names are `idx_gatekeeper_log_location_ts`, `idx_gatekeeper_log_contact_id`, `idx_gatekeeper_log_classification` (3 indexes, matching migration and model `__table_args__`).
+  Also added `action_taken` comment listing valid values and `confidence NUMERIC(4,3)` precision.
+
+- `DEV_SPEC.md` § `ai_usage` DDL — four corrections:
+  1. `contact_id UUID REFERENCES contacts(id)` → `ghl_contact_id TEXT` nullable (implementation stores the GHL contact ID string, not an internal FK).
+  2. `use_case` comment updated: added `gatekeeper` to the list (M6b is the first writer; was missing from spec).
+  3. `step` comment updated: added `classification` (the step value written by the gatekeeper; was missing from spec).
+  4. Index name corrected: was `idx_ai_usage_billing`; correct names are `idx_ai_usage_location_ts` + `idx_ai_usage_use_case_ts` (two indexes, matching migration and model). `NUMERIC(12,6)` precision added.
+
+- `07_foundation_layer.md` § AI Usage Logger table — three corrections:
+  1. Column `contact_id` renamed to `ghl_contact_id` (TEXT, nullable) and noted that there is no internal UUID FK on this table.
+  2. `use_case` values updated: added `gatekeeper`; removed `UC03` (was removed in v2).
+  3. `step` values updated: added `"classification"` (gatekeeper step).
+  Hard-cap description: removed UC03 reference (UC03 was removed in v2).
+
+- `07_foundation_layer.md` § Layer 2 `gatekeeper_log` table summary — updated column list to reflect the two-column contact-reference design (`ghl_contact_id` nullable TEXT + `contact_id` nullable UUID without FK constraint) and added `inbound_surface`, `ghl_message_id`, `override_ts`.
+
+**No code changes required.** All M6b code is internally consistent and implements the spec intent. Specs were stale relative to implementation details.
+
 ### v9 — 2026-05-29 — M6 consent layer spec consistency pass
 
 Post-M6 audit comparing the new consent layer implementation against `08_consent_model.md`, `07_foundation_layer.md`, and `00_master_overview.md`.
