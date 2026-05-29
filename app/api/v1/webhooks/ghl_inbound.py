@@ -92,9 +92,24 @@ async def _verify_ghl_signature(
     if not signature_header:
         raise HTTPException(status_code=401, detail="Missing X-GHL-Signature header")
 
-    # Derive signing key from the location's OAuth token ref (simplified v1 pattern)
-    # Full GHL HMAC validation is wired per their v2 webhook docs.
-    signing_secret = location.ghl_oauth_token_ref or ""
+    # Use the dedicated GHL webhook signing secret from settings.
+    # GHL signs the POST body with HMAC-SHA256 using the secret configured in the
+    # GHL sub-account's webhook settings — this is a separate credential from the
+    # OAuth token.  ghl_oauth_token_ref is a secret-manager reference, not a key.
+    # If GHL_WEBHOOK_SIGNING_SECRET is not configured, we reject rather than silently
+    # accepting everything (fail-closed > fail-open).
+    signing_secret = settings.ghl_webhook_signing_secret or ""
+    if not signing_secret:
+        logger.error(
+            "ghl_inbound: GHL_WEBHOOK_SIGNING_SECRET not configured — "
+            "rejecting request (set the secret or enable GHL_WEBHOOK_SKIP_SIG_CHECK=true "
+            "for local dev)"
+        )
+        raise HTTPException(
+            status_code=401,
+            detail="Webhook signature secret not configured on server",
+        )
+
     expected = hmac.new(
         signing_secret.encode(),
         body,

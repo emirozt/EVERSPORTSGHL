@@ -36,7 +36,7 @@ import uuid
 from datetime import datetime, timezone
 from typing import Any
 
-from fastapi import APIRouter, Body, Depends, HTTPException, Security, status
+from fastapi import APIRouter, Body, Depends, HTTPException, Query, Security, status
 from fastapi.security import APIKeyHeader
 from pydantic import BaseModel
 from sqlalchemy import func, select, update
@@ -131,12 +131,20 @@ def _job_to_summary(job: SchedulerJob) -> JobSummary:
 @router.get("/status", dependencies=[Depends(_require_admin)])
 async def scheduler_status(
     db: AsyncSession = Depends(get_db),
+    location_id: uuid.UUID | None = Query(
+        default=None,
+        description="Filter counts to a single location.  Omit for system-wide totals.",
+    ),
 ) -> dict[str, Any]:
     """
     Return aggregate counts of scheduler_jobs by status.
 
+    Query params:
+      location_id (UUID, optional) — scope counts to one location
+
     Response:
       {
+        "location_id": "<uuid> | null",
         "counts": {"pending": N, "running": N, "done": N, "failed": N},
         "total": N,
         "worker_poll_interval_seconds": 30
@@ -144,16 +152,18 @@ async def scheduler_status(
     """
     from app.scheduler.worker import POLL_INTERVAL_SECONDS  # noqa: PLC0415
 
-    stmt = (
-        select(SchedulerJob.status, func.count(SchedulerJob.id).label("n"))
-        .group_by(SchedulerJob.status)
+    stmt = select(SchedulerJob.status, func.count(SchedulerJob.id).label("n")).group_by(
+        SchedulerJob.status
     )
+    if location_id is not None:
+        stmt = stmt.where(SchedulerJob.location_id == location_id)
     rows = (await db.execute(stmt)).fetchall()
     counts: dict[str, int] = {"pending": 0, "running": 0, "done": 0, "failed": 0}
     for row_status, n in rows:
         counts[row_status] = n
 
     return {
+        "location_id": str(location_id) if location_id else None,
         "counts": counts,
         "total": sum(counts.values()),
         "worker_poll_interval_seconds": POLL_INTERVAL_SECONDS,

@@ -2,15 +2,15 @@
 M7 — AI pricing, client wrapper, and budget enforcement tests.
 
 Test classes:
-  TestPricing      (8)  — compute_cost, known_models, get_price, edge cases
+  TestPricing      (12) — compute_cost, known_models, get_price, edge cases
   TestAiClient     (9)  — success, fallback, both-fail, injectable stub
-  TestBudgetStatus (5)  — dataclass properties and summary
+  TestBudgetStatus (7)  — dataclass properties and summary
   TestIsEssential  (7)  — essentiality rules for all use-case / step combos
   TestCheckBudget  (5)  — DB query via in-memory mock
   TestAssertBudget (6)  — soft cap, hard cap essential, hard cap non-essential
-  TestSoftCapEmail (5)  — maybe_send_soft_cap_warning paths
+  TestSoftCapEmail (6)  — maybe_send_soft_cap_warning paths + dedup
 
-Total: 45 tests
+Total: 52 tests
 """
 
 from __future__ import annotations
@@ -533,3 +533,46 @@ class TestSoftCapEmail:
                 )
         # Non-fatal — returns False instead of raising
         assert result is False
+
+    @pytest.mark.asyncio
+    async def test_dedup_prevents_second_email_same_month(self):
+        """
+        A second call for the same location in the same calendar month should
+        return False immediately without touching SMTP.
+        """
+        import app.ai.budget as budget_module
+
+        loc_id = uuid.UUID("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa")
+        status = BudgetStatus(
+            location_id=loc_id,
+            spend=Decimal("85"),
+            budget=Decimal("100"),
+            ratio=Decimal("0.85"),
+        )
+        # Ensure clean state for this location before the test
+        budget_module._soft_cap_warned.pop(str(loc_id), None)
+
+        try:
+            with patch("app.config.get_settings") as mock_settings:
+                mock_settings.return_value = MagicMock(
+                    notification_smtp_host="smtp.example.com",
+                    notification_smtp_port=587,
+                    notification_smtp_user=None,
+                    notification_smtp_password=None,
+                    notification_from_email="noreply@example.com",
+                )
+                with patch("asyncio.get_event_loop") as mock_loop:
+                    mock_loop.return_value.run_in_executor = AsyncMock(return_value=None)
+                    # First call — should send
+                    first = await maybe_send_soft_cap_warning(
+                        status, owner_email="owner@example.com", location_name="Studio"
+                    )
+                    # Second call — same location, same month — must be deduplicated
+                    second = await maybe_send_soft_cap_warning(
+                        status, owner_email="owner@example.com", location_name="Studio"
+                    )
+            assert first is True, "first call should have sent the warning"
+            assert second is False, "second call must be suppressed by dedup cache"
+        finally:
+            # Leave no state for other tests
+            budget_module._soft_cap_warned.pop(str(loc_id), None)

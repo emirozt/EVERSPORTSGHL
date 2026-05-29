@@ -106,6 +106,9 @@ async def _claim_next_job(
                 )
                 .order_by(WritebackJob.created_at)
                 .limit(1)
+                # Prevents two concurrent processes from claiming the same job.
+                # SKIP LOCKED means a second worker moves on rather than waiting.
+                .with_for_update(skip_locked=True)
             )
             result = await db.execute(stmt)
             job = result.scalar_one_or_none()

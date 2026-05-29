@@ -34,7 +34,7 @@ import uuid
 from datetime import datetime, timezone
 from typing import Any
 
-from fastapi import APIRouter, Body, Depends, HTTPException, Security, status
+from fastapi import APIRouter, Body, Depends, HTTPException, Query, Security, status
 from fastapi.security import APIKeyHeader
 from pydantic import BaseModel
 from sqlalchemy import func, select, update
@@ -155,18 +155,26 @@ def _make_idempotency_key(
 @router.get("/status", dependencies=[Depends(_require_admin)])
 async def writeback_status(
     db: AsyncSession = Depends(get_db),
+    location_id: uuid.UUID | None = Query(
+        default=None,
+        description="Filter counts to a single location.  Omit for system-wide totals.",
+    ),
 ) -> dict[str, Any]:
     """
     Return aggregate counts of writeback_jobs by status, plus current
     safety mode and dry-run flag.
+
+    Query params:
+      location_id (UUID, optional) — scope counts to one location
     """
     from app.writeback.executor import MAX_ATTEMPTS, POLL_INTERVAL_SECONDS  # noqa: PLC0415
 
     settings = get_settings()
-    stmt = (
-        select(WritebackJob.status, func.count(WritebackJob.id).label("n"))
-        .group_by(WritebackJob.status)
+    stmt = select(WritebackJob.status, func.count(WritebackJob.id).label("n")).group_by(
+        WritebackJob.status
     )
+    if location_id is not None:
+        stmt = stmt.where(WritebackJob.location_id == location_id)
     rows = (await db.execute(stmt)).fetchall()
     counts: dict[str, int] = {
         "queued": 0, "running": 0, "succeeded": 0, "failed": 0, "dead": 0,
@@ -175,6 +183,7 @@ async def writeback_status(
         counts[row_status] = n
 
     return {
+        "location_id": str(location_id) if location_id else None,
         "counts": counts,
         "total": sum(counts.values()),
         "writeback_dry_run": settings.writeback_dry_run,

@@ -72,11 +72,21 @@ class ConsentResult:
 
 
 # ── Channel → custom field name mapping ──────────────────────────────────────
+# Channels not in this map are DENIED by default (unknown channel = no consent
+# baseline).  All channels normalised by ghl_inbound._normalise_channel() must
+# appear here so that gatekeeper routing and UC04 replies on social channels
+# don't silently block valid service responses.
 
 _CONSENT_FIELD: dict[str, str] = {
-    "email":     "consent_marketing_email",
-    "whatsapp":  "consent_marketing_whatsapp",
-    "voice":     "consent_marketing_voice",
+    "email":              "consent_marketing_email",
+    "whatsapp":           "consent_marketing_whatsapp",
+    "voice":              "consent_marketing_voice",
+    # Social channels — follow the same naming convention.  Studios that don't
+    # use these channels leave the GHL field unset → DENY (safe default).
+    "instagram_dm":       "consent_marketing_instagram_dm",
+    "instagram_comment":  "consent_marketing_instagram_comment",
+    "facebook_dm":        "consent_marketing_facebook_dm",
+    "facebook_comment":   "consent_marketing_facebook_comment",
 }
 
 

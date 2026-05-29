@@ -53,6 +53,14 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
+# ── Soft-cap deduplication ────────────────────────────────────────────────────
+# Keyed by str(location_id) → "YYYY-MM".  Prevents spamming the owner inbox on
+# every AI call once the 80% threshold is crossed — at most one email is sent
+# per location per calendar month.  Reset on process restart (intentional: a
+# new deployment resets state cleanly and the first call after restart re-sends
+# if still over threshold).
+_soft_cap_warned: dict[str, str] = {}
+
 
 # ── Essentiality rules ────────────────────────────────────────────────────────
 
@@ -272,6 +280,10 @@ async def maybe_send_soft_cap_warning(
     Send a soft-cap warning email to the owner if ``status.is_soft_cap_exceeded``
     and ``owner_email`` is configured.
 
+    Deduplication: at most one email is sent per location per calendar month
+    (UTC).  Subsequent calls within the same month return ``False`` immediately
+    without touching SMTP.
+
     This is intentionally non-fatal — SMTP failures are logged but not raised.
 
     Args:
@@ -280,10 +292,24 @@ async def maybe_send_soft_cap_warning(
         location_name:  Human-readable studio name for the email body.
 
     Returns:
-        True if the email was sent, False otherwise.
+        True if the email was sent, False otherwise (not over threshold, no
+        email configured, already warned this month, or SMTP failure).
     """
     if not status.is_soft_cap_exceeded:
         return False
+
+    # Dedup: only send once per location per calendar month (UTC)
+    now_utc = datetime.now(timezone.utc)
+    month_key = now_utc.strftime("%Y-%m")
+    loc_key = str(status.location_id)
+    if _soft_cap_warned.get(loc_key) == month_key:
+        logger.debug(
+            "ai.budget: soft cap warning already sent for location %s in %s — skipping",
+            status.location_id,
+            month_key,
+        )
+        return False
+
     if not owner_email:
         logger.debug(
             "ai.budget: soft cap exceeded but no owner_email configured — skipping warning"
@@ -331,6 +357,8 @@ async def maybe_send_soft_cap_warning(
                 from_email=settings.notification_from_email,
             ),
         )
+        # Record that we warned this month so we don't send again until next month
+        _soft_cap_warned[loc_key] = month_key
         logger.info(
             "ai.budget: soft cap warning email sent to %s for location %s",
             owner_email,

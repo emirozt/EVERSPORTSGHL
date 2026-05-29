@@ -6,12 +6,11 @@ FastAPI lifespan.  It polls the scheduler_jobs table every POLL_INTERVAL_SECONDS
 seconds, claims the next due pending job, and calls run_sync() for it.
 
 Claim strategy:
-  The worker updates a job's status from 'pending' → 'running' with a
-  targeted UPDATE that also checks status='pending' — this makes the claim
-  safe under concurrent calls.  In single-process deployments (the common
-  case for M4) this is sufficient.  For multi-process deployments the SELECT
-  FOR UPDATE SKIP LOCKED pattern should be added (Postgres only; omitted here
-  for SQLite test compatibility).
+  The worker uses SELECT FOR UPDATE SKIP LOCKED to atomically claim jobs.
+  Two concurrent worker processes will never claim the same job: one acquires
+  the row lock, the other skips the locked row and moves on.  The claim and
+  the status update happen in the same transaction, so there is no window
+  between read and write.
 
 Error handling:
   - SessionExpiredError   → job marked 'failed'; operator must re-import cookies.
@@ -101,7 +100,9 @@ async def _claim_next_job(
     """
     async with factory() as db:
         async with db.begin():
-            # Find the oldest due pending job
+            # Find the oldest due pending job.
+            # FOR UPDATE SKIP LOCKED: a second concurrent worker skips a
+            # row that is already being claimed, preventing double-processing.
             stmt = (
                 select(SchedulerJob)
                 .where(
@@ -110,6 +111,7 @@ async def _claim_next_job(
                 )
                 .order_by(SchedulerJob.scheduled_at)
                 .limit(1)
+                .with_for_update(skip_locked=True)
             )
             result = await db.execute(stmt)
             job = result.scalar_one_or_none()
