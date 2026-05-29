@@ -225,6 +225,14 @@ async def enqueue_writeback_job(
                     parsed_dt = _dt.now(_tz.utc)
                 guard.check_booking_target(body.payload.get(class_key, ""), parsed_dt)
         except SafetyGuardError as exc:
+            # Record the rejection in the audit log before returning 422,
+            # so the operator can see what was blocked and why.
+            from app.writeback.audit import record_safety_rejection  # noqa: PLC0415
+            await record_safety_rejection(
+                action=body.job_type,
+                payload=body.payload,
+                rejection_reason=str(exc),
+            )
             raise HTTPException(
                 status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
                 detail=str(exc),

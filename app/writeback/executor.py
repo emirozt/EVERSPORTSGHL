@@ -305,48 +305,52 @@ async def execute_writeback_job(
             result,
         )
 
-        # Record audit + send notification (live mode only)
-        if not effective_dry_run:
-            # Resolve customer email from whichever field the job type uses:
-            #   create_customer         → payload["email"]
-            #   create/cancel_booking   → payload["customer_email"]  (if present)
-            #   reschedule_booking      → payload["customer_email"]
-            # create_booking has no email field in the spec — fall back to
-            # "customer_id:<id>" so the audit entry is never blank.
-            customer_email = (
-                payload.get("email")
-                or payload.get("customer_email")
-                or (
-                    f"customer_id:{payload['customer_id']}"
-                    if "customer_id" in payload
-                    else ""
-                )
+        # ── Audit log — always written (dry_run or live) ──────────────────────
+        # Resolve customer email from whichever field the job type uses:
+        #   create_customer         → payload["email"]
+        #   create/cancel_booking   → payload["customer_email"]  (if present)
+        #   reschedule_booking      → payload["customer_email"]
+        # create_booking has no email field in the spec — fall back to
+        # "customer_id:<id>" so the audit entry is never blank.
+        customer_email = (
+            payload.get("email")
+            or payload.get("customer_email")
+            or (
+                f"customer_id:{payload['customer_id']}"
+                if "customer_id" in payload
+                else ""
             )
-            class_name = payload.get("class_name") or payload.get("new_class_name")
-            start_dt_str = payload.get("session_datetime") or payload.get("new_session_datetime")
-            start_dt = None
-            if start_dt_str:
-                try:
-                    from datetime import datetime as _dt  # noqa: PLC0415
-                    start_dt = _dt.fromisoformat(start_dt_str)
-                except ValueError:
-                    pass
+        )
+        class_name = payload.get("class_name") or payload.get("new_class_name")
+        start_dt_str = payload.get("session_datetime") or payload.get("new_session_datetime")
+        start_dt = None
+        if start_dt_str:
+            try:
+                from datetime import datetime as _dt  # noqa: PLC0415
+                start_dt = _dt.fromisoformat(start_dt_str)
+            except ValueError:
+                pass
 
+        # Fire GHL webhook for live mode only
+        ghl_fired = None
+        if not effective_dry_run:
             ghl_fired = await _fire_ghl_webhook(
                 ghl_success_webhook_url,
                 {"job_type": job_type, "result": result, "idempotency_key": idempotency_key},
                 "writeback-success",
             )
 
-            await record_writeback(
-                action=job_type,
-                customer_email=customer_email,
-                class_name=class_name,
-                start_dt=start_dt,
-                idempotency_key=idempotency_key,
-                eversports_response=result,
-                ghl_webhook_fired=ghl_fired,
-            )
+        audit_mode = "dry_run" if effective_dry_run else "live"
+        await record_writeback(
+            action=job_type,
+            customer_email=customer_email,
+            class_name=class_name,
+            start_dt=start_dt,
+            idempotency_key=idempotency_key,
+            eversports_response=result,
+            ghl_webhook_fired=ghl_fired,
+            mode=audit_mode,
+        )
 
         await _mark_succeeded(factory, job_id)
 

@@ -103,9 +103,10 @@ async def record_writeback(
     idempotency_key: str,
     eversports_response: Any,
     ghl_webhook_fired: str | None,
+    mode: str = "live",
 ) -> None:
     """
-    Record a completed live writeback: append to audit log + send email.
+    Record a writeback attempt: append to audit log + send email (live only).
 
     Args:
         action:                e.g. "create_booking"
@@ -115,6 +116,7 @@ async def record_writeback(
         idempotency_key:       sha256 key used for this job
         eversports_response:   raw response from Eversports (any JSON-serialisable)
         ghl_webhook_fired:     e.g. "writeback-success" or None
+        mode:                  "live" | "dry_run" — controls whether email is sent
 
     Raises:
         AuditError: if audit log write or email notification fails.
@@ -126,6 +128,7 @@ async def record_writeback(
     ts = datetime.now(timezone.utc)
     entry: dict[str, Any] = {
         "ts": ts.isoformat(),
+        "mode": mode,
         "action": action,
         "customer_email": customer_email,
         "class_name": class_name,
@@ -146,7 +149,11 @@ async def record_writeback(
     except Exception as exc:  # noqa: BLE001
         raise AuditError(f"Failed to write audit log: {exc}") from exc
 
-    # ── 2. Email notification ─────────────────────────────────────────────────
+    # ── 2. Email notification (live mode only) ────────────────────────────────
+    if mode != "live":
+        logger.debug("audit: mode=%s — skipping email notification", mode)
+        return
+
     to_email = settings.notification_owner_email
     if not to_email:
         logger.warning(
@@ -193,6 +200,44 @@ async def record_writeback(
         raise AuditError(
             f"Failed to send notification email to {to_email}: {exc}"
         ) from exc
+
+
+async def record_safety_rejection(
+    *,
+    action: str,
+    payload: dict[str, Any],
+    rejection_reason: str,
+) -> None:
+    """
+    Record an API-level safety-guard rejection to the audit log.
+
+    Called when the enqueue endpoint rejects a job before it is queued
+    (SafetyGuardError at submission time).  Does NOT send email.
+
+    Args:
+        action:           Job type (e.g. "create_customer").
+        payload:          The submitted payload that was rejected.
+        rejection_reason: Human-readable reason from SafetyGuardError.
+    """
+    ts = datetime.now(timezone.utc)
+    entry: dict[str, Any] = {
+        "ts": ts.isoformat(),
+        "mode": "safety_guard_rejected",
+        "action": action,
+        "customer_email": payload.get("email") or payload.get("customer_email", ""),
+        "class_name": payload.get("class_name") or payload.get("new_class_name"),
+        "start_dt": payload.get("session_datetime") or payload.get("new_session_datetime"),
+        "idempotency_key": None,
+        "eversports_response": None,
+        "ghl_webhook_fired": None,
+        "rejection_reason": rejection_reason,
+    }
+    try:
+        await asyncio.get_event_loop().run_in_executor(None, _append_audit_line, entry)
+        logger.info("audit: safety_guard_rejected entry written action=%s", action)
+    except Exception as exc:  # noqa: BLE001
+        # Non-fatal — log but don't propagate (the 422 response already informs the caller)
+        logger.error("audit: failed to write safety_rejection entry: %s", exc)
 
 
 async def record_teardown(
