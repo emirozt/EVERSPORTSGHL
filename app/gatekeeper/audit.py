@@ -25,6 +25,7 @@ from decimal import Decimal
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.ai.pricing import compute_cost as _compute_cost
 from app.db.models.ai_usage import AiUsage
 from app.db.models.gatekeeper_log import GatekeeperLog
 from app.gatekeeper.classifier import ClassificationResult
@@ -93,7 +94,7 @@ async def log_ai_usage(
         model=result.model,
         prompt_tokens=result.prompt_tokens,
         completion_tokens=result.completion_tokens,
-        cost_usd=Decimal(str(round(result.cost_usd, 6))),
+        cost_usd=_compute_cost(result.model, result.prompt_tokens, result.completion_tokens),
         ts=ts or datetime.now(tz=timezone.utc),
     )
     db.add(row)

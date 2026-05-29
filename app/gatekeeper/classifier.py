@@ -46,10 +46,9 @@ CLASSIFICATION_CATEGORIES: list[str] = [
     "low_confidence",       # Classifier not confident — escalate to owner
 ]
 
-# Default model cost constants (Haiku — conservative overestimate for M6b;
-# M7 will replace with a proper price card).
-_HAIKU_COST_PER_1K_INPUT = 0.00025   # USD
-_HAIKU_COST_PER_1K_OUTPUT = 0.00125  # USD
+# M7: cost computation is now handled by app/ai/pricing.py (compute_cost).
+# The ClassificationResult.cost_usd property below uses it instead of hardcoded
+# constants so all models stay in sync with the central price card.
 
 # ── System prompt ─────────────────────────────────────────────────────────────
 
@@ -109,11 +108,10 @@ class ClassificationResult:
 
     @property
     def cost_usd(self) -> float:
-        """Conservative per-call cost estimate."""
-        return (
-            self.prompt_tokens / 1000 * _HAIKU_COST_PER_1K_INPUT
-            + self.completion_tokens / 1000 * _HAIKU_COST_PER_1K_OUTPUT
-        )
+        """Per-call cost estimate from the M7 model price card."""
+        from app.ai.pricing import compute_cost  # noqa: PLC0415
+
+        return float(compute_cost(self.model, self.prompt_tokens, self.completion_tokens))
 
 
 # ── Contact snippet builder ───────────────────────────────────────────────────
